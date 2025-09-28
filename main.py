@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from sklearn.model_selection import train_test_split
 
 from src.data_loader import load_movielens_1m
 from src.features.user_features import build_user_features
@@ -14,7 +13,7 @@ from src.recall.two_tower import TwoTowerModel
 from src.losses import InBatchSoftmaxLoss
 from src.rank.rank_mlp import RankerMLP
 from src.evaluation import evaluate_with_faiss, evaluate_ranker_with_faiss
-from src.utils import remap_ids
+from src.utils import remap_ids, user_stratified_split
 from src.faiss_index import FaissIndex
 
 
@@ -31,9 +30,9 @@ def main():
     num_items = max_item_id + 1
 
     # -----------------------------
-    # 2) Train/test split (avoid leakage)
+    # 2) Train/test split (avoid cold-start users in test)
     # -----------------------------
-    train, test = train_test_split(ratings, test_size=0.1, random_state=42)
+    train, test = user_stratified_split(ratings, test_frac=0.1, random_state=42)
     test_pairs = list(zip(test.user_idx.values.tolist(), test.item_idx.values.tolist()))
 
     # -----------------------------
