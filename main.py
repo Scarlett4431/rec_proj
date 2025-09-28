@@ -11,6 +11,9 @@ from src.feature_encoder import FeatureEncoder
 from src.recall_dataset import RecallDataset
 from src.rank_dataset import RankDataset
 from src.recall.two_tower import TwoTowerModel
+from src.recall.covisitation import build_covisitation_index, build_user_covisitation_candidates
+from src.recall.item_cf import build_item_cf_index, build_user_itemcf_candidates
+from src.recall.hybrid import merge_candidate_lists
 from src.losses import InBatchSoftmaxLoss
 from src.rank.rank_mlp import RankerMLP
 from src.evaluation import evaluate_with_faiss, evaluate_ranker_with_faiss
@@ -68,6 +71,9 @@ def main():
     # -----------------------------
     user_feats_df = build_user_features(train, movies)
     item_feats_df = build_item_features(train, movies)
+
+    # covis_index = build_covisitation_index(train, max_items_per_user=50, top_k=200)
+    item_cf_index = build_item_cf_index(train, max_items_per_user=100, top_k=200)
 
     user_store = FeatureStore(
         user_feats_df,
@@ -177,6 +183,19 @@ def main():
 
     user_emb, item_emb = export_embeddings()
 
+    # covis_user_candidates = build_user_covisitation_candidates(
+    #     train,
+    #     covis_index,
+    #     top_k=100,
+    #     max_history=25,
+    # )
+    itemcf_user_candidates = build_user_itemcf_candidates(
+        train,
+        item_cf_index,
+        top_k=100,
+        max_history=50,
+    )
+
     # -----------------------------
     # 6) Hard-negative mining dataset & fine-tuning
     # -----------------------------
@@ -234,8 +253,17 @@ def main():
     user_candidates = {}
     for u in range(num_users):
         _, idxs = faiss_index.search(user_emb[u].detach().cpu(), k=candidate_k)
-        candidates = [int(i) for i in idxs.tolist() if i >= 0]
-        user_candidates[u] = candidates
+        faiss_candidates = [int(i) for i in idxs.tolist() if i >= 0]
+        # covis_list = covis_user_candidates.get(u, [])
+        itemcf_list = itemcf_user_candidates.get(u, [])
+        user_candidates[u] = merge_candidate_lists(
+            [
+                (faiss_candidates, 0.6),
+                # (covis_list, 0.3),
+                (itemcf_list, 0.4),
+            ],
+            candidate_k,
+        )
 
     # -----------------------------
     # 7) Recall evaluation
