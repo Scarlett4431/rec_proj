@@ -19,5 +19,5 @@ Recall pipeline: Introduced multiple recall streams—co-visitation, item-based 
 FAISS index: upgraded to support ANN IVF search with fallback to exact when the catalog is small, ready for scale.
 Ranking: continues to score the merged candidate list using the two-tower user/item embeddings; the extra recall streams expand the pool without changing the embedding backbone.
 Result:
-Hybrid Recall Eval (after hard-neg): {'recall@k': 0.22536268134067033, 'ndcg@k': 0.04421326537977961}, K = 100
-Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.027803901950975488, 'ndcg@k': 0.012417552488592547}, K = 10
+Hybrid Recall Eval (after hard-neg): {'recall@k': 0.23990995497748874, 'ndcg@k': 0.04662188754030811}, K = 100
+Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.03028514257128564, 'ndcg@k': 0.013483822228789712}, K = 10

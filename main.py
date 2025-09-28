@@ -7,15 +7,15 @@ from src.data_loader import load_movielens_1m
 from src.features.user_features import build_user_features
 from src.features.item_features import build_item_features
 from src.features.feature_store import FeatureStore
-from src.feature_encoder import FeatureEncoder
-from src.feature_utils import (
+from src.features.feature_encoder import FeatureEncoder
+from src.features.feature_utils import (
     move_to_device,
     encode_features,
     encode_store_batch,
     encode_all_entities,
 )
-from src.recall_dataset import RecallDataset
-from src.rank_dataset import RankDataset
+from src.dataset.recall_dataset import RecallDataset
+from src.dataset.rank_dataset import RankDataset
 from src.recall.two_tower import TwoTowerModel
 from src.recall.covisitation import build_covisitation_index, build_user_covisitation_candidates
 from src.recall.item_cf import build_item_cf_index, build_user_itemcf_candidates
