@@ -44,16 +44,18 @@ def main():
     user_store = FeatureStore(
         user_feats_df,
         "user_idx",
-        numeric_cols=["user_total_ratings", "user_avg_rating", "user_recency_days"],
+        numeric_cols=[],
         cat_cols=[],
-        bucket_cols=[],
+        bucket_cols=["user_total_ratings", "user_avg_rating", "user_recency_days"],
+        bucket_bins=10,
     )
+    item_numeric_cols = ["item_total_ratings", "item_avg_rating", "item_release_year"]
     item_store = FeatureStore(
         item_feats_df,
         "item_idx",
-        numeric_cols=["item_total_ratings", "item_avg_rating"],
+        numeric_cols=[],
         cat_cols=[],
-        bucket_cols=[],
+        bucket_cols=item_numeric_cols,
         bucket_bins=10,
     )
 
