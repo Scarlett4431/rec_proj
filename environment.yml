@@ -1,0 +1,14 @@
+name: rec_proj
+channels:
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+dependencies:
+  - python=3.12
+  - matplotlib
+  - numpy
+  - pandas
+  - scikit-learn
+  - ipykernel
+  - jupyter
+  - tensorflow
+prefix: /opt/anaconda3/envs/rec_proj
