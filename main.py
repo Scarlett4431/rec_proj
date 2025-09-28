@@ -7,6 +7,7 @@ from src.data_loader import load_movielens_1m
 from src.features.user_features import build_user_features
 from src.features.item_features import build_item_features
 from src.features.feature_store import FeatureStore
+from src.feature_encoder import FeatureEncoder
 from src.recall_dataset import RecallDataset
 from src.rank_dataset import RankDataset
 from src.recall.two_tower import TwoTowerModel
@@ -15,6 +16,33 @@ from src.rank.rank_mlp import RankerMLP
 from src.evaluation import evaluate_with_faiss, evaluate_ranker_with_faiss
 from src.utils import remap_ids, user_stratified_split
 from src.faiss_index import FaissIndex
+
+
+def move_to_device(struct, device):
+    if isinstance(struct, torch.Tensor):
+        return struct.to(device)
+    if isinstance(struct, dict):
+        return {k: move_to_device(v, device) for k, v in struct.items()}
+    return struct
+
+
+def encode_features(encoder, feature_batch, device):
+    feature_batch = move_to_device(feature_batch, device)
+    return encoder(feature_batch)
+
+
+def encode_store_batch(store, encoder, ids, device, max_lengths):
+    if isinstance(ids, torch.Tensor):
+        id_list = ids.detach().cpu().tolist()
+    else:
+        id_list = ids
+    batch = store.get_batch(id_list, max_multi_lengths=max_lengths)
+    return encode_features(encoder, batch, device)
+
+
+def encode_all_entities(store, encoder, count, device, max_lengths):
+    ids = list(range(count))
+    return encode_store_batch(store, encoder, ids, device, max_lengths)
 
 
 def main():
@@ -46,6 +74,7 @@ def main():
         "user_idx",
         numeric_cols=[],
         cat_cols=[],
+        multi_cat_cols=["watched_items"],
         bucket_cols=["user_total_ratings", "user_avg_rating", "user_recency_days"],
         bucket_bins=10,
     )
@@ -55,17 +84,33 @@ def main():
         "item_idx",
         numeric_cols=[],
         cat_cols=[],
+        multi_cat_cols=["item_genres"],
         bucket_cols=item_numeric_cols,
         bucket_bins=10,
     )
 
-    # Precompute dense feature matrices (CPU + device copies)
-    user_feat_matrix_cpu = user_store.to_matrix(max_user_id)
-    item_feat_matrix_cpu = item_store.to_matrix(max_item_id)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    user_feat_matrix = user_feat_matrix_cpu.to(device)
-    item_feat_matrix = item_feat_matrix_cpu.to(device)
+
+    user_encoder = FeatureEncoder(
+        numeric_dim=user_store.numeric_dim,
+        cat_dims=user_store.cat_dims,
+        bucket_dims=user_store.bucket_dims,
+        multi_cat_dims=user_store.multi_cat_dims,
+        embed_dim=32,
+        proj_dim=32,
+    ).to(device)
+
+    item_encoder = FeatureEncoder(
+        numeric_dim=item_store.numeric_dim,
+        cat_dims=item_store.cat_dims,
+        bucket_dims=item_store.bucket_dims,
+        multi_cat_dims=item_store.multi_cat_dims,
+        embed_dim=32,
+        proj_dim=32,
+    ).to(device)
+
+    user_multi_max = {"watched_items": 50}
+    item_multi_max = {"item_genres": 5}
 
     # -----------------------------
     # 4) Recall dataset & loader (warm-up)
@@ -77,10 +122,13 @@ def main():
         num_users=num_users,
         num_items=num_items,
         embed_dim=64,
-        user_extra_dim=recall_ds.user_feat_dim,
-        item_extra_dim=recall_ds.item_feat_dim,
+        user_extra_dim=user_encoder.out_dim,
+        item_extra_dim=item_encoder.out_dim,
     ).to(device)
-    opt = optim.Adam(model.parameters(), lr=1e-3)
+    opt = optim.Adam(
+        list(model.parameters()) + list(user_encoder.parameters()) + list(item_encoder.parameters()),
+        lr=1e-3,
+    )
     recall_loss = InBatchSoftmaxLoss()
 
     # -----------------------------
@@ -92,8 +140,9 @@ def main():
         for batch in recall_loader:
             user_ids = batch["user_id"].to(device)
             pos_items = batch["pos_item"].to(device)
-            u_feats = batch["user_feats"].to(device)
-            i_feats = batch["pos_item_feats"].to(device)
+
+            u_feats = encode_store_batch(user_store, user_encoder, user_ids, device, user_multi_max)
+            i_feats = encode_store_batch(item_store, item_encoder, pos_items, device, item_multi_max)
 
             opt.zero_grad()
             u_emb, v_emb = model(user_ids, pos_items,
@@ -107,11 +156,23 @@ def main():
 
     def export_embeddings():
         model.eval()
+        user_encoder.eval()
+        item_encoder.eval()
         with torch.no_grad():
-            user_ids_full = torch.arange(num_users, device=device, dtype=torch.long)
-            item_ids_full = torch.arange(num_items, device=device, dtype=torch.long)
-            u_emb = model.user_embed(user_ids_full, user_feats=user_feat_matrix)
-            i_emb = model.item_embed(item_ids_full, item_feats=item_feat_matrix)
+            user_ids_full = torch.arange(num_users, dtype=torch.long)
+            item_ids_full = torch.arange(num_items, dtype=torch.long)
+
+            user_feats_raw = user_store.get_batch(user_ids_full.tolist(), max_multi_lengths=user_multi_max)
+            item_feats_raw = item_store.get_batch(item_ids_full.tolist(), max_multi_lengths=item_multi_max)
+
+            user_side = encode_features(user_encoder, user_feats_raw, device)
+            item_side = encode_features(item_encoder, item_feats_raw, device)
+
+            u_emb = model.user_embed(user_ids_full.to(device), user_feats=user_side)
+            i_emb = model.item_embed(item_ids_full.to(device), item_feats=item_side)
+        model.train()
+        user_encoder.train()
+        item_encoder.train()
         return u_emb, i_emb
 
     user_emb, item_emb = export_embeddings()
@@ -135,8 +196,9 @@ def main():
         for batch in recall_hard_loader:
             user_ids = batch["user_id"].to(device)
             pos_items = batch["pos_item"].to(device)
-            u_feats = batch["user_feats"].to(device)
-            pos_feats = batch["pos_item_feats"].to(device)
+
+            u_feats = encode_store_batch(user_store, user_encoder, user_ids, device, user_multi_max)
+            pos_feats = encode_store_batch(item_store, item_encoder, pos_items, device, item_multi_max)
 
             u_emb, pos_emb = model(user_ids, pos_items,
                                    user_feats=u_feats,
@@ -148,8 +210,8 @@ def main():
                 valid_mask = hard_items >= 0
                 if valid_mask.any():
                     neg_item_ids = hard_items[valid_mask]
-                    neg_item_feats = item_feat_matrix[neg_item_ids]
-                    hard_emb = model.item_embed(neg_item_ids, item_feats=neg_item_feats)
+                    neg_feats = encode_store_batch(item_store, item_encoder, neg_item_ids, device, item_multi_max)
+                    hard_emb = model.item_embed(neg_item_ids, item_feats=neg_feats)
                     v_emb = torch.cat([v_emb, hard_emb], dim=0)
 
             opt.zero_grad()
@@ -161,8 +223,13 @@ def main():
 
     user_emb, item_emb = export_embeddings()
 
+    user_feat_matrix_cpu = encode_all_entities(user_store, user_encoder, num_users, device, user_multi_max).detach().cpu()
+    item_feat_matrix_cpu = encode_all_entities(item_store, item_encoder, num_items, device, item_multi_max).detach().cpu()
+    user_feat_matrix = user_feat_matrix_cpu.to(device)
+    item_feat_matrix = item_feat_matrix_cpu.to(device)
+
     # Build recall candidate pool for ranking using FAISS top-k
-    candidate_k = 200
+    candidate_k = 100
     faiss_index = FaissIndex(item_emb.detach().cpu())
     user_candidates = {}
     for u in range(num_users):
@@ -173,8 +240,15 @@ def main():
     # -----------------------------
     # 7) Recall evaluation
     # -----------------------------
-    recall_results = evaluate_with_faiss(user_emb.cpu(), item_emb.cpu(), test_pairs, k=200)
+    recall_results = evaluate_with_faiss(user_emb.cpu(), item_emb.cpu(), test_pairs, k=100)
     print("FAISS Recall Eval (after hard-neg):", recall_results)
+
+    user_encoder.eval()
+    item_encoder.eval()
+    for param in user_encoder.parameters():
+        param.requires_grad_(False)
+    for param in item_encoder.parameters():
+        param.requires_grad_(False)
 
     # -----------------------------
     # 8) Ranking dataset & model
@@ -194,7 +268,7 @@ def main():
 
     # # Debug: verify negatives come from recall shortlist
     # debug_mismatches = 0
-    # for idx in range(min(200, len(rank_train_ds))):
+    # for idx in range(min(100, len(rank_train_ds))):
     #     u, i, label = rank_train_ds.samples[idx].tolist()
     #     if label == 0 and i not in user_candidates.get(u, []):
     #         debug_mismatches += 1
@@ -208,8 +282,8 @@ def main():
     ranker = RankerMLP(
         user_dim=user_emb.shape[1],
         item_dim=item_emb.shape[1],
-        user_feat_dim=user_store.total_dim,
-        item_feat_dim=item_store.total_dim,
+        user_feat_dim=user_encoder.out_dim,
+        item_feat_dim=item_encoder.out_dim,
         hidden_dim=128,
     ).to(device)
 
@@ -246,7 +320,7 @@ def main():
             user_emb.cpu(),
             item_emb.cpu(),
             test_pairs,
-            faiss_k=200,
+            faiss_k=100,
             rank_k=10,
             device=device,
             user_feat_matrix=user_feat_matrix_cpu,

@@ -59,15 +59,9 @@ class RecallDataset(Dataset):
     def __getitem__(self, idx):
         u, pos_item = self.pairs[idx]
 
-        # Features: tensors (from FeatureStore)
-        u_feats = self.user_store.get_tensor(u)
-        i_feats = self.item_store.get_tensor(pos_item)
-
         sample = {
             "user_id": torch.tensor(u, dtype=torch.long),
             "pos_item": torch.tensor(pos_item, dtype=torch.long),
-            "user_feats": u_feats,         # tensor
-            "pos_item_feats": i_feats,     # tensor
         }
 
         # Hard negatives

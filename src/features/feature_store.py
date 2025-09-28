@@ -13,12 +13,14 @@ class FeatureStore:
     def __init__(self, df, id_col,
                  numeric_cols=None,
                  cat_cols=None,
+                 multi_cat_cols=None,
                  bucket_cols=None,
                  bucket_bins=10):
 
         self.id_col = id_col
         self.numeric_cols = numeric_cols or []
         self.cat_cols = cat_cols or []
+        self.multi_cat_cols = multi_cat_cols or []
         self.bucket_cols = bucket_cols or []
         self.bucket_bins = bucket_bins
 
@@ -51,6 +53,23 @@ class FeatureStore:
             self.cat_vocabs[col] = vocab
             self.cat_df[col] = df[col].map(vocab).fillna(0).astype(int)
 
+        # ---- Multi-categorical (lists of tokens) ----
+        self.multi_cat_vocabs = {}
+        self.multi_cat_data = {}
+        for col in self.multi_cat_cols:
+            tokens_series = df[col].apply(
+                lambda x: x if isinstance(x, (list, tuple)) else ([] if pd.isna(x) else [x])
+            )
+            unique_tokens = sorted({token for tokens in tokens_series for token in tokens})
+            vocab = {token: idx + 1 for idx, token in enumerate(unique_tokens)}  # 0 reserved for padding
+            self.multi_cat_vocabs[col] = vocab
+
+            id_map = {}
+            for entity_id, tokens in zip(df[id_col], tokens_series):
+                ids = [vocab[token] for token in tokens if token in vocab]
+                id_map[int(entity_id)] = torch.tensor(ids, dtype=torch.long)
+            self.multi_cat_data[col] = id_map
+
         # ---- Build lookup ----
         self.data = {}
         for _, row in df.iterrows():
@@ -69,10 +88,16 @@ class FeatureStore:
                 for col in self.bucket_cols
             }
 
+            multi_cat_feats = {
+                col: self.multi_cat_data[col].get(idx, torch.zeros(0, dtype=torch.long))
+                for col in self.multi_cat_cols
+            }
+
             self.data[idx] = {
                 "numeric": numeric_feats,
                 "categorical": cat_feats,
                 "bucket": bucket_feats,
+                "multi_categorical": multi_cat_feats,
             }
 
     def get(self, idx: int):
@@ -82,7 +107,74 @@ class FeatureStore:
             "numeric": torch.zeros(len(self.numeric_cols), dtype=torch.float32),
             "categorical": {c: torch.tensor(0, dtype=torch.long) for c in self.cat_cols},
             "bucket": {c: torch.tensor(0, dtype=torch.long) for c in self.bucket_cols},
+            "multi_categorical": {c: torch.zeros(0, dtype=torch.long) for c in self.multi_cat_cols},
         })
+
+    def get_batch(self, ids, max_multi_lengths=None):
+        if isinstance(ids, torch.Tensor):
+            ids = ids.tolist()
+
+        max_multi_lengths = max_multi_lengths or {}
+
+        numeric_list = [] if self.numeric_cols else None
+        cat_lists = {col: [] for col in self.cat_cols}
+        bucket_lists = {col: [] for col in self.bucket_cols}
+        multi_lists = {col: [] for col in self.multi_cat_cols}
+
+        for idx in ids:
+            feats = self.get(idx)
+            if numeric_list is not None:
+                numeric_list.append(feats["numeric"])
+            for col in self.cat_cols:
+                cat_lists[col].append(feats["categorical"][col])
+            for col in self.bucket_cols:
+                bucket_lists[col].append(feats["bucket"][col])
+            for col in self.multi_cat_cols:
+                seq = feats["multi_categorical"][col]
+                multi_lists[col].append(seq)
+
+        result = {}
+        if numeric_list is not None:
+            result["numeric"] = torch.stack(numeric_list) if numeric_list else torch.zeros((0, len(self.numeric_cols)))
+        else:
+            result["numeric"] = torch.zeros((len(ids), 0)) if ids else torch.zeros((0, 0))
+
+        result["categorical"] = {
+            col: torch.stack(tensors) if tensors else torch.zeros((len(ids),), dtype=torch.long)
+            for col, tensors in cat_lists.items()
+        }
+        result["bucket"] = {
+            col: torch.stack(tensors) if tensors else torch.zeros((len(ids),), dtype=torch.long)
+            for col, tensors in bucket_lists.items()
+        }
+
+        multi_cat = {}
+        multi_lengths = {}
+        for col, sequences in multi_lists.items():
+            if not sequences:
+                multi_cat[col] = torch.zeros((len(ids), 0), dtype=torch.long)
+                multi_lengths[col] = torch.zeros(len(ids), dtype=torch.long)
+                continue
+
+            max_len = max_multi_lengths.get(col)
+            if max_len is None:
+                max_len = max((len(seq) for seq in sequences), default=0)
+            padded = []
+            lengths = []
+            for seq in sequences:
+                seq_len = len(seq)
+                seq = seq[:max_len]
+                lengths.append(min(seq_len, max_len))
+                if len(seq) < max_len:
+                    seq = torch.cat([seq, torch.zeros(max_len - len(seq), dtype=torch.long)])
+                padded.append(seq)
+            multi_cat[col] = torch.stack(padded)
+            multi_lengths[col] = torch.tensor(lengths, dtype=torch.float32).unsqueeze(-1)
+
+        result["multi_categorical"] = multi_cat
+        result["multi_lengths"] = multi_lengths
+
+        return result
 
     def get_tensor(self, idx: int):
         """
@@ -143,3 +235,7 @@ class FeatureStore:
     @property
     def total_dim(self):
         return len(self.numeric_cols) + len(self.cat_cols) + len(self.bucket_cols)
+
+    @property
+    def multi_cat_dims(self):
+        return {col: len(vocab) + 1 for col, vocab in self.multi_cat_vocabs.items()}
