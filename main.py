@@ -15,6 +15,7 @@ from src.losses import InBatchSoftmaxLoss
 from src.rank.rank_mlp import RankerMLP
 from src.evaluation import evaluate_with_faiss, evaluate_ranker_with_faiss
 from src.utils import remap_ids
+from src.faiss_index import FaissIndex
 
 
 def main():
@@ -159,10 +160,19 @@ def main():
 
     user_emb, item_emb = export_embeddings()
 
+    # Build recall candidate pool for ranking using FAISS top-k
+    candidate_k = 200
+    faiss_index = FaissIndex(item_emb.detach().cpu())
+    user_candidates = {}
+    for u in range(num_users):
+        _, idxs = faiss_index.search(user_emb[u].detach().cpu(), k=candidate_k)
+        candidates = [int(i) for i in idxs.tolist() if i >= 0]
+        user_candidates[u] = candidates
+
     # -----------------------------
     # 7) Recall evaluation
     # -----------------------------
-    recall_results = evaluate_with_faiss(user_emb.cpu(), item_emb.cpu(), test_pairs, k=10)
+    recall_results = evaluate_with_faiss(user_emb.cpu(), item_emb.cpu(), test_pairs, k=200)
     print("FAISS Recall Eval (after hard-neg):", recall_results)
 
     # -----------------------------
@@ -178,7 +188,20 @@ def main():
         item_emb=item_emb.detach().cpu(),
         user_feat_tensor=user_feat_matrix_cpu,
         item_feat_tensor=item_feat_matrix_cpu,
+        user_candidates=user_candidates,
     )
+
+    # # Debug: verify negatives come from recall shortlist
+    # debug_mismatches = 0
+    # for idx in range(min(200, len(rank_train_ds))):
+    #     u, i, label = rank_train_ds.samples[idx].tolist()
+    #     if label == 0 and i not in user_candidates.get(u, []):
+    #         debug_mismatches += 1
+    #         if debug_mismatches <= 5:
+    #             print(f"[Debug] negative {i} for user {u} not in recall shortlist")
+    # if debug_mismatches == 0:
+    #     print("[Debug] all checked negatives come from recall candidates.")
+
     rank_loader = DataLoader(rank_train_ds, batch_size=512, shuffle=True, drop_last=True)
 
     ranker = RankerMLP(

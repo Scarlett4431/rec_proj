@@ -6,15 +6,13 @@ from src.features.feature_store import FeatureStore
 
 
 class RankDataset(Dataset):
-    """
-    Ranking dataset.
-    Returns recall embeddings + user/item side features separately.
-    """
+    """Ranking dataset built from recall candidates (two-stage pipeline)."""
 
     def __init__(self, ratings_df, num_items,
                  user_store: FeatureStore, item_store: FeatureStore,
                  num_negatives=5, user_emb=None, item_emb=None,
-                 user_feat_tensor=None, item_feat_tensor=None):
+                 user_feat_tensor=None, item_feat_tensor=None,
+                 user_candidates=None):
 
         self.num_items = num_items
         self.num_negatives = num_negatives
@@ -44,6 +42,9 @@ class RankDataset(Dataset):
         for u, i in self.user_item_pairs:
             self.user_rated[u].add(i)
 
+        # Recall candidate pool per user (FAISS shortlist)
+        self.user_candidates = user_candidates or {}
+
         # Positive + negative samples
         samples = []
         rng = np.random.default_rng()
@@ -54,18 +55,28 @@ class RankDataset(Dataset):
             if num_negatives <= 0:
                 continue
 
-            # Sample negatives with rejection using vectorized draw
-            needed = num_negatives
             rated = self.user_rated[u]
+            candidate_pool = self.user_candidates.get(u)
+            negatives_source = None
+            if candidate_pool:
+                negatives_source = np.array(candidate_pool, dtype=np.int64)
+
+            needed = num_negatives
             attempts = 0
             while needed > 0:
-                draws = rng.choice(all_items, size=max(needed * 2, 8), replace=True)
+                if negatives_source is not None:
+                    draws = rng.choice(negatives_source, size=max(needed, 1), replace=True)
+                else:
+                    draws = rng.choice(all_items, size=max(needed, 1), replace=True)
+
                 candidates = [item for item in draws if item not in rated]
+
                 if not candidates:
                     attempts += 1
-                    if attempts > 5:
+                    if attempts > 10:
                         break
                     continue
+
                 take = candidates[:needed]
                 samples.extend((u, j, 0) for j in take)
                 needed -= len(take)
