@@ -26,3 +26,5 @@ Version 1.3:
 Recall: Two-tower embeddings are L2-normalized, add temperature in InBatchSoftmaxLoss, default as 0.1. RecallDataset add optional easy-negatvie sampler that mixes random catalog items with hard negatives, plus cached per-user masks to keep sampling overhead low. 
 Hybrid Recall Eval (after hard-neg): {'recall@k': 0.2625412706353177, 'ndcg@k': 0.05497410929710433}, K = 100
 Currently without easy and harder neg, but change the two tower model: {'recall@k': 0.25002501250625314, 'ndcg@k': 0.048952612925014016}
+
+Holy shit!! without using two tower: {'recall@k': 0.2675937968984492, 'ndcg@k': 0.06396957095022068}

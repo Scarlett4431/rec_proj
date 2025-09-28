@@ -44,10 +44,13 @@ def main():
     num_items = max_item_id + 1
 
     # -----------------------------
-    # 2) Train/test split (avoid cold-start users in test)
+    # 2) Train/val/test split (avoid cold-start users in test)
     # -----------------------------
-    train, test = user_stratified_split(ratings, test_frac=0.1, random_state=42)
+    train_all, test = user_stratified_split(ratings, test_frac=0.1, random_state=42)
+    train, val = user_stratified_split(train_all, test_frac=0.1, random_state=7)
     test_pairs = list(zip(test.user_idx.values.tolist(), test.item_idx.values.tolist()))
+    val_pairs = list(zip(val.user_idx.values.tolist(), val.item_idx.values.tolist()))
+    val_users = sorted(val.user_idx.unique().tolist())
 
     # -----------------------------
     # 3) Build engineered features from train slice
@@ -106,6 +109,16 @@ def main():
     user_feature_cache = user_store.get_batch(list(range(num_users)), max_multi_lengths=user_multi_max)
     item_feature_cache = item_store.get_batch(list(range(num_items)), max_multi_lengths=item_multi_max)
 
+    def evaluate_on_validation(user_emb_eval, item_emb_eval, k=100):
+        if not val_users:
+            return {"recall@k": 0.0, "ndcg@k": 0.0}
+        faiss_idx = FaissIndex(item_emb_eval.detach().cpu())
+        candidates = {}
+        for u in val_users:
+            _, idxs = faiss_idx.search(user_emb_eval[u].detach().cpu(), k=k)
+            candidates[u] = [int(i) for i in idxs.tolist() if i >= 0]
+        return evaluate_candidates(candidates, val_pairs, k=k)
+
     # -----------------------------
     # 4) Recall dataset & loader (warm-up)
     # -----------------------------
@@ -134,10 +147,33 @@ def main():
     )
     recall_loss = InBatchSoftmaxLoss(temperature=0.1)
 
+    def export_embeddings():
+        model.eval()
+        user_encoder.eval()
+        item_encoder.eval()
+        with torch.no_grad():
+            user_ids_full = torch.arange(num_users, dtype=torch.long)
+            item_ids_full = torch.arange(num_items, dtype=torch.long)
+
+            user_feats_raw = user_store.get_batch(user_ids_full.tolist(), max_multi_lengths=user_multi_max)
+            item_feats_raw = item_store.get_batch(item_ids_full.tolist(), max_multi_lengths=item_multi_max)
+
+            user_side = encode_features(user_encoder, user_feats_raw, device)
+            item_side = encode_features(item_encoder, item_feats_raw, device)
+
+            u_emb = model.user_embed(user_ids_full.to(device), user_feats=user_side)
+            i_emb = model.item_embed(item_ids_full.to(device), item_feats=item_side)
+        model.train()
+        user_encoder.train()
+        item_encoder.train()
+        return u_emb, i_emb
+
     # -----------------------------
     # 5) Warm-up recall training
     # -----------------------------
-    warmup_epochs = 6
+    warmup_epochs = 15
+    latest_user_emb = None
+    latest_item_emb = None
     for epoch in range(warmup_epochs):
         model.train()
         total_loss = 0.0
@@ -169,33 +205,16 @@ def main():
             loss.backward()
             opt.step()
             total_loss += loss.item()
+        latest_user_emb, latest_item_emb = export_embeddings()
+        val_metrics = evaluate_on_validation(latest_user_emb, latest_item_emb, k=100)
+        val_recall = val_metrics.get("recall@k", 0.0)
+        val_ndcg = val_metrics.get("ndcg@k", 0.0)
         print(
             f"[Recall] Warm-up Epoch {epoch + 1}/{warmup_epochs}, Loss = {total_loss / len(recall_loader):.4f}, "
-            f"easy-neg time {easy_neg_time:.3f}s"
+            f"easy-neg time {easy_neg_time:.3f}s, val_recall@100={val_recall:.4f}, val_ndcg@100={val_ndcg:.4f}"
         )
 
-    def export_embeddings():
-        model.eval()
-        user_encoder.eval()
-        item_encoder.eval()
-        with torch.no_grad():
-            user_ids_full = torch.arange(num_users, dtype=torch.long)
-            item_ids_full = torch.arange(num_items, dtype=torch.long)
-
-            user_feats_raw = user_store.get_batch(user_ids_full.tolist(), max_multi_lengths=user_multi_max)
-            item_feats_raw = item_store.get_batch(item_ids_full.tolist(), max_multi_lengths=item_multi_max)
-
-            user_side = encode_features(user_encoder, user_feats_raw, device)
-            item_side = encode_features(item_encoder, item_feats_raw, device)
-
-            u_emb = model.user_embed(user_ids_full.to(device), user_feats=user_side)
-            i_emb = model.item_embed(item_ids_full.to(device), item_feats=item_side)
-        model.train()
-        user_encoder.train()
-        item_encoder.train()
-        return u_emb, i_emb
-
-    user_emb, item_emb = export_embeddings()
+    user_emb, item_emb = latest_user_emb, latest_item_emb
 
     covis_user_candidates = build_user_covisitation_candidates(
         train,
@@ -231,7 +250,10 @@ def main():
     )
     recall_hard_loader = DataLoader(recall_hard_ds, batch_size=512, shuffle=True, drop_last=True)
 
-    for epoch in range(3):
+    latest_user_emb = user_emb
+    latest_item_emb = item_emb
+    hard_epochs = 3
+    for epoch in range(hard_epochs):
         model.train()
         total_loss = 0.0
         hard_neg_time = 0.0
@@ -275,12 +297,17 @@ def main():
             loss.backward()
             opt.step()
             total_loss += loss.item()
+        latest_user_emb, latest_item_emb = export_embeddings()
+        val_metrics = evaluate_on_validation(latest_user_emb, latest_item_emb, k=100)
+        val_recall = val_metrics.get("recall@k", 0.0)
+        val_ndcg = val_metrics.get("ndcg@k", 0.0)
         print(
-            f"[Recall+HardNeg] Epoch {epoch + 1}, Loss = {total_loss / len(recall_hard_loader):.4f}, "
-            f"hard-neg time {hard_neg_time:.3f}s, easy-neg time {easy_neg_time:.3f}s"
+            f"[Recall+HardNeg] Epoch {epoch + 1}/{hard_epochs}, Loss = {total_loss / len(recall_hard_loader):.4f}, "
+            f"hard-neg time {hard_neg_time:.3f}s, easy-neg time {easy_neg_time:.3f}s, "
+            f"val_recall@100={val_recall:.4f}, val_ndcg@100={val_ndcg:.4f}"
         )
 
-    user_emb, item_emb = export_embeddings()
+    user_emb, item_emb = latest_user_emb, latest_item_emb
 
     user_feat_matrix_cpu = encode_features(user_encoder, user_feature_cache, device).detach().cpu()
     item_feat_matrix_cpu = encode_features(item_encoder, item_feature_cache, device).detach().cpu()
