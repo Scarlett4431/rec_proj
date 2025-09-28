@@ -4,10 +4,10 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 from sklearn.model_selection import train_test_split
 
-# --- project imports ---
 from src.data_loader import load_movielens_1m
 from src.features.user_features import build_user_features
 from src.features.item_features import build_item_features
+from src.features.feature_store import FeatureStore
 from src.recall_dataset import RecallDataset
 from src.rank_dataset import RankDataset
 from src.recall.two_tower import TwoTowerModel
@@ -19,36 +19,57 @@ from src.utils import remap_ids
 
 def main():
     # -----------------------------
-    # 1) Load data
+    # 1) Load data & remap IDs
     # -----------------------------
-
     ratings, movies = load_movielens_1m("data/ml-1m")
     ratings, movies, user2id, item2id = remap_ids(ratings, movies)
 
+    max_user_id = int(ratings["user_idx"].max())
+    max_item_id = int(ratings["item_idx"].max())
+    num_users = max_user_id + 1
+    num_items = max_item_id + 1
+
+    # -----------------------------
+    # 2) Train/test split (avoid leakage)
+    # -----------------------------
     train, test = train_test_split(ratings, test_size=0.1, random_state=42)
-
-    num_users = ratings["user_idx"].nunique()
-    num_items = ratings["item_idx"].nunique()
+    test_pairs = list(zip(test.user_idx.values.tolist(), test.item_idx.values.tolist()))
 
     # -----------------------------
-    # 2) Split train/test first (avoid leakage)
-    # -----------------------------
-    train, test = train_test_split(ratings, test_size=0.1, random_state=42)
-    test_pairs = list(zip(test.userId.values.tolist(), test.movieId.values.tolist()))
-
-    # -----------------------------
-    # 3) Build features from train slice only
+    # 3) Build engineered features from train slice
     # -----------------------------
     user_feats_df = build_user_features(train)
     item_feats_df = build_item_features(train, movies)
 
-    # -----------------------------
-    # 4) Recall dataset (first-pass, no hard negatives)
-    # -----------------------------
-    recall_ds = RecallDataset(train, user_feats_df, item_feats_df)
-    recall_loader = DataLoader(recall_ds, batch_size=1024, shuffle=True, drop_last=True)
+    user_store = FeatureStore(
+        user_feats_df,
+        "user_idx",
+        numeric_cols=["user_total_ratings", "user_avg_rating", "user_recency_days"],
+        cat_cols=[],
+        bucket_cols=[],
+    )
+    item_store = FeatureStore(
+        item_feats_df,
+        "item_idx",
+        numeric_cols=["item_total_ratings", "item_avg_rating"],
+        cat_cols=[],
+        bucket_cols=[],
+        bucket_bins=10,
+    )
+
+    # Precompute dense feature matrices (CPU + device copies)
+    user_feat_matrix_cpu = user_store.to_matrix(max_user_id)
+    item_feat_matrix_cpu = item_store.to_matrix(max_item_id)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    user_feat_matrix = user_feat_matrix_cpu.to(device)
+    item_feat_matrix = item_feat_matrix_cpu.to(device)
+
+    # -----------------------------
+    # 4) Recall dataset & loader (warm-up)
+    # -----------------------------
+    recall_ds = RecallDataset(train, user_store, item_store)
+    recall_loader = DataLoader(recall_ds, batch_size=1024, shuffle=True, drop_last=True)
 
     model = TwoTowerModel(
         num_users=num_users,
@@ -57,98 +78,76 @@ def main():
         user_extra_dim=recall_ds.user_feat_dim,
         item_extra_dim=recall_ds.item_feat_dim,
     ).to(device)
-
     opt = optim.Adam(model.parameters(), lr=1e-3)
     recall_loss = InBatchSoftmaxLoss()
 
     # -----------------------------
-    # 5) Train recall model (warm-up)
+    # 5) Warm-up recall training
     # -----------------------------
-    # Warm-up recall training
     for epoch in range(3):
         model.train()
         total_loss = 0.0
         for batch in recall_loader:
             user_ids = batch["user_id"].to(device)
-            item_ids = batch["pos_item"].to(device)
-            u_feats  = batch["user_feats"].to(device)
-            i_feats  = batch["pos_item_feats"].to(device)
+            pos_items = batch["pos_item"].to(device)
+            u_feats = batch["user_feats"].to(device)
+            i_feats = batch["pos_item_feats"].to(device)
 
             opt.zero_grad()
-            u_emb, v_emb = model(user_ids, item_ids,
-                                user_feats=u_feats,
-                                item_feats=i_feats)
+            u_emb, v_emb = model(user_ids, pos_items,
+                                 user_feats=u_feats,
+                                 item_feats=i_feats)
             loss = recall_loss(u_emb, v_emb)
             loss.backward()
             opt.step()
             total_loss += loss.item()
-        print(f"[Recall] Warm-up Epoch {epoch+1}, Loss = {total_loss/len(recall_loader):.4f}")
-
-    # -----------------------------
-    # 6) Export embeddings (for hard-neg mining)
-    # -----------------------------
-    all_user_feats = recall_ds.get_user_feature_matrix(num_users).to(device)
-    all_item_feats = recall_ds.get_item_feature_matrix(num_items).to(device)
+        print(f"[Recall] Warm-up Epoch {epoch + 1}, Loss = {total_loss / len(recall_loader):.4f}")
 
     def export_embeddings():
         model.eval()
         with torch.no_grad():
-            user_ids_full = torch.arange(num_users + 1, device=device, dtype=torch.long)
-            item_ids_full = torch.arange(num_items + 1, device=device, dtype=torch.long)
-            u_emb = model.user_embed(user_ids_full, user_feats=all_user_feats)
-            i_emb = model.item_embed(item_ids_full, item_feats=all_item_feats)
+            user_ids_full = torch.arange(num_users, device=device, dtype=torch.long)
+            item_ids_full = torch.arange(num_items, device=device, dtype=torch.long)
+            u_emb = model.user_embed(user_ids_full, user_feats=user_feat_matrix)
+            i_emb = model.item_embed(item_ids_full, item_feats=item_feat_matrix)
         return u_emb, i_emb
 
     user_emb, item_emb = export_embeddings()
 
     # -----------------------------
-    # 7) Build recall dataset with hard negatives
+    # 6) Hard-negative mining dataset & fine-tuning
     # -----------------------------
     recall_hard_ds = RecallDataset(
         train,
-        user_feats_df,
-        item_feats_df,
+        user_store,
+        item_store,
         item_emb=item_emb.detach().cpu(),
         hard_neg_k=50,
-        hard_neg_samples=2
+        hard_neg_samples=2,
     )
     recall_hard_loader = DataLoader(recall_hard_ds, batch_size=512, shuffle=True, drop_last=True)
 
-    # -----------------------------
-    # 8) Fine-tune with hard negatives
-    # -----------------------------
     for epoch in range(3):
         model.train()
         total_loss = 0.0
         for batch in recall_hard_loader:
-            user_ids = batch["user_id"].to(device)           # [B]
-            pos_items = batch["pos_item"].to(device)         # [B]
-            u_feats = batch["user_feats"].to(device)         # [B, Fu]
-            pos_feats = batch["pos_item_feats"].to(device)   # [B, Fi]
+            user_ids = batch["user_id"].to(device)
+            pos_items = batch["pos_item"].to(device)
+            u_feats = batch["user_feats"].to(device)
+            pos_feats = batch["pos_item_feats"].to(device)
 
-            # Positive pairs
             u_emb, pos_emb = model(user_ids, pos_items,
                                    user_feats=u_feats,
                                    item_feats=pos_feats)
             v_emb = pos_emb
 
-            # Hard negatives (expect shape [B, S], padded with -1)
             hard_items = batch["hard_neg_items"].to(device)
-            if hard_items.numel() > 0 and hard_items.dim() == 2:
-                B, S = hard_items.shape
-                hard_items_flat = hard_items.reshape(-1)       # [B*S]
-                valid_mask = hard_items_flat >= 0
-                hard_items_valid = hard_items_flat[valid_mask]
-
-                if hard_items_valid.numel() > 0:
-                    user_ids_expanded = user_ids.repeat_interleave(S)[valid_mask]
-                    u_feats_expanded = u_feats.repeat_interleave(S, dim=0)[valid_mask]
-                    hard_feats = all_item_feats[hard_items_valid]
-
-                    _, hard_emb = model(user_ids_expanded,
-                                        hard_items_valid,
-                                        user_feats=u_feats_expanded,
-                                        item_feats=hard_feats)
+            if hard_items.numel() > 0:
+                valid_mask = hard_items >= 0
+                if valid_mask.any():
+                    neg_item_ids = hard_items[valid_mask]
+                    neg_item_feats = item_feat_matrix[neg_item_ids]
+                    hard_emb = model.item_embed(neg_item_ids, item_feats=neg_item_feats)
                     v_emb = torch.cat([v_emb, hard_emb], dim=0)
 
             opt.zero_grad()
@@ -156,36 +155,38 @@ def main():
             loss.backward()
             opt.step()
             total_loss += loss.item()
-        print(f"[Recall+HardNeg] Epoch {epoch+1}, Loss = {total_loss/len(recall_hard_loader):.4f}")
+        print(f"[Recall+HardNeg] Epoch {epoch + 1}, Loss = {total_loss / len(recall_hard_loader):.4f}")
 
-    # -----------------------------
-    # 9) Re-export embeddings (after fine-tune)
-    # -----------------------------
     user_emb, item_emb = export_embeddings()
 
-    # Evaluate recall directly
+    # -----------------------------
+    # 7) Recall evaluation
+    # -----------------------------
     recall_results = evaluate_with_faiss(user_emb.cpu(), item_emb.cpu(), test_pairs, k=10)
     print("FAISS Recall Eval (after hard-neg):", recall_results)
 
     # -----------------------------
-    # 10) Rank dataset & model
+    # 8) Ranking dataset & model
     # -----------------------------
     rank_train_ds = RankDataset(
         ratings_df=train,
         num_items=num_items,
-        user_features=user_feats_df,
-        item_features=item_feats_df,
+        user_store=user_store,
+        item_store=item_store,
         num_negatives=5,
         user_emb=user_emb.detach().cpu(),
         item_emb=item_emb.detach().cpu(),
+        user_feat_tensor=user_feat_matrix_cpu,
+        item_feat_tensor=item_feat_matrix_cpu,
     )
     rank_loader = DataLoader(rank_train_ds, batch_size=512, shuffle=True, drop_last=True)
 
     ranker = RankerMLP(
         user_dim=user_emb.shape[1],
         item_dim=item_emb.shape[1],
-        extra_dim=rank_train_ds.extra_dim,
-        hidden_dim=128
+        user_feat_dim=user_store.total_dim,
+        item_feat_dim=item_store.total_dim,
+        hidden_dim=128,
     ).to(device)
 
     opt_r = optim.Adam(ranker.parameters(), lr=1e-3)
@@ -194,20 +195,25 @@ def main():
     for epoch in range(3):
         ranker.train()
         total_loss = 0.0
-        for u_emb_batch, i_emb_batch, extra_feats, labels in rank_loader:
-            u_emb_batch, i_emb_batch = u_emb_batch.to(device), i_emb_batch.to(device)
-            extra_feats, labels = extra_feats.to(device), labels.to(device)
+        for batch in rank_loader:
+            u_emb_batch = batch["u_emb"].to(device)
+            i_emb_batch = batch["i_emb"].to(device)
+            u_feats_batch = batch["u_feats"].to(device)
+            i_feats_batch = batch["i_feats"].to(device)
+            labels = batch["label"].to(device)
 
             opt_r.zero_grad()
-            preds = ranker(u_emb_batch, i_emb_batch, extra_feats=extra_feats)
+            preds = ranker(u_emb_batch, i_emb_batch,
+                           u_feats=u_feats_batch,
+                           i_feats=i_feats_batch)
             loss = rank_loss(preds, labels)
             loss.backward()
             opt_r.step()
             total_loss += loss.item()
-        print(f"[Rank] Epoch {epoch+1}, Loss = {total_loss/len(rank_loader):.4f}")
+        print(f"[Rank] Epoch {epoch + 1}, Loss = {total_loss / len(rank_loader):.4f}")
 
     # -----------------------------
-    # 11) Rank evaluation
+    # 9) Ranker evaluation (recall + rerank)
     # -----------------------------
     ranker.eval()
     with torch.no_grad():
@@ -219,8 +225,8 @@ def main():
             faiss_k=200,
             rank_k=10,
             device=device,
-            user_feat_matrix=all_user_feats.cpu(),
-            item_feat_matrix=all_item_feats.cpu(),
+            user_feat_matrix=user_feat_matrix_cpu,
+            item_feat_matrix=item_feat_matrix_cpu,
         )
     print("Ranker Eval (Recall+Rank):", rank_results)
 

@@ -53,7 +53,11 @@ def evaluate_ranker_with_faiss(
     for u, true_item in test_pairs:
         # 1) Recall candidates
         _, idxs = index.search(user_emb[u].detach().cpu(), k=faiss_k)
-        candidate_items = idxs.tolist()
+        candidate_items = [i for i in idxs.tolist() if i >= 0]
+        if not candidate_items:
+            results["recall@k"].append(0.0)
+            results["ndcg@k"].append(0.0)
+            continue
 
         # 2) Build inputs for ranker
         u_vec = user_emb[u].unsqueeze(0)                         # [1, d]
@@ -61,16 +65,16 @@ def evaluate_ranker_with_faiss(
         u_expand = u_vec.repeat(cand_vecs.size(0), 1)            # [C, d]
 
         # Side features (optional)
+        u_side = i_side = None
         if (user_feat_matrix is not None) and (item_feat_matrix is not None):
             u_side = user_feat_matrix[u].unsqueeze(0).repeat(cand_vecs.size(0), 1)  # [C, Fu]
             i_side = item_feat_matrix[candidate_items]                               # [C, Fi]
-            cand_extra_feats = torch.cat([u_side, i_side], dim=1)                   # [C, Fu+Fi]
-        else:
-            cand_extra_feats = None
 
         # 3) Rank
         with torch.no_grad():
-            scores = ranker(u_expand, cand_vecs, extra_feats=cand_extra_feats)      # [C] or [C,]
+            scores = ranker(u_expand, cand_vecs,
+                           u_feats=u_side,
+                           i_feats=i_side)
             # ensure 1D
             scores = scores.view(-1).detach().cpu().numpy()
 

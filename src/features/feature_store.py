@@ -1,39 +1,145 @@
+import pandas as pd
 import torch
+
 
 class FeatureStore:
     """
-    Utility to store numeric features for entities (users, items).
-    Provides dict lookup + default vector + aligned full matrix export.
+    Generalized feature store:
+      - Numeric features (normalized float32)
+      - Categorical features (embedding lookup via vocab index, long)
+      - Bucketized numeric features (as categorical bins, long)
     """
 
-    def __init__(self, df, id_col):
+    def __init__(self, df, id_col,
+                 numeric_cols=None,
+                 cat_cols=None,
+                 bucket_cols=None,
+                 bucket_bins=10):
+
+        self.id_col = id_col
+        self.numeric_cols = numeric_cols or []
+        self.cat_cols = cat_cols or []
+        self.bucket_cols = bucket_cols or []
+        self.bucket_bins = bucket_bins
+
+        # Ensure integer IDs
+        df = df.copy()
+        df[id_col] = df[id_col].astype(int)
+
+        # ---- Normalize numeric ----
+        self.scalers = {}
+        self.numeric_df = pd.DataFrame(index=df[id_col])
+        for col in self.numeric_cols:
+            mean = df[col].mean()
+            std = df[col].std() + 1e-6
+            self.scalers[col] = (mean, std)
+            self.numeric_df[col] = ((df[col] - mean) / std).fillna(0.0)
+
+        # ---- Bucketize numeric ----
+        self.bucket_df = pd.DataFrame(index=df[id_col])
+        self.bucket_vocab_sizes = {}
+        for col in self.bucket_cols:
+            self.bucket_df[col] = pd.cut(df[col], bins=bucket_bins, labels=False).fillna(0).astype(int)
+            self.bucket_vocab_sizes[col] = bucket_bins
+
+        # ---- Categorical ----
+        self.cat_df = pd.DataFrame(index=df[id_col])
+        self.cat_vocabs = {}
+        for col in self.cat_cols:
+            unique = df[col].dropna().unique().tolist()
+            vocab = {val: idx + 1 for idx, val in enumerate(unique)}  # +1 for padding
+            self.cat_vocabs[col] = vocab
+            self.cat_df[col] = df[col].map(vocab).fillna(0).astype(int)
+
+        # ---- Build lookup ----
+        self.data = {}
+        for _, row in df.iterrows():
+            idx = int(row[id_col])
+
+            numeric_feats = (
+                torch.tensor(self.numeric_df.loc[idx].values, dtype=torch.float32)
+                if self.numeric_cols else torch.zeros(0, dtype=torch.float32)
+            )
+            cat_feats = {
+                col: torch.tensor(int(self.cat_df.loc[idx, col]), dtype=torch.long)
+                for col in self.cat_cols
+            }
+            bucket_feats = {
+                col: torch.tensor(int(self.bucket_df.loc[idx, col]), dtype=torch.long)
+                for col in self.bucket_cols
+            }
+
+            self.data[idx] = {
+                "numeric": numeric_feats,
+                "categorical": cat_feats,
+                "bucket": bucket_feats,
+            }
+
+    def get(self, idx: int):
+        """Return dict of feature groups for one entity (idx must be int)."""
+        idx = int(idx)
+        return self.data.get(idx, {
+            "numeric": torch.zeros(len(self.numeric_cols), dtype=torch.float32),
+            "categorical": {c: torch.tensor(0, dtype=torch.long) for c in self.cat_cols},
+            "bucket": {c: torch.tensor(0, dtype=torch.long) for c in self.bucket_cols},
+        })
+
+    def get_tensor(self, idx: int):
         """
-        df: DataFrame with [id_col, feat1, feat2, ...]
-        id_col: "userId" or "movieId"
+        Return concatenated tensor of all features (numeric + categorical + bucketized).
+        - numeric kept as float32
+        - categorical/bucket cast to float32 for concatenation
         """
-        if df is None or df.empty:
-            self.feat_dict = {}
-            self.default = torch.zeros(0, dtype=torch.float32)
-            self.dim = 0
-            return
+        feats = self.get(idx)
+        numeric = feats["numeric"]
+        cat = [feats["categorical"][c].float() for c in self.cat_cols]
+        bucket = [feats["bucket"][c].float() for c in self.bucket_cols]
 
-        numeric = df.set_index(id_col).select_dtypes(include="number").fillna(0.0)
+        if cat:
+            cat = torch.stack(cat)
+        else:
+            cat = torch.zeros(0, dtype=torch.float32)
 
-        self.feat_dict = {
-            idx: torch.tensor(row.values, dtype=torch.float32)
-            for idx, row in numeric.iterrows()
-        }
-        self.default = torch.zeros(numeric.shape[1], dtype=torch.float32)
-        self.dim = numeric.shape[1]
+        if bucket:
+            bucket = torch.stack(bucket)
+        else:
+            bucket = torch.zeros(0, dtype=torch.float32)
 
-    def get(self, idx):
-        """Return feature vector for id (or default if missing)."""
-        return self.feat_dict.get(idx, self.default)
+        return torch.cat([numeric, cat, bucket], dim=0)
 
-    def to_matrix(self, max_id):
-        """Build aligned dense matrix [max_id+1, dim]."""
-        mat = torch.zeros((max_id + 1, self.dim), dtype=torch.float32)
-        for idx, feats in self.feat_dict.items():
-            if idx <= max_id:
-                mat[idx] = feats
+    def to_numeric_matrix(self, max_id: int):
+        """[N, F] numeric features only."""
+        mat = torch.zeros((max_id + 1, len(self.numeric_cols)), dtype=torch.float32)
+        for idx, feats in self.data.items():
+            idx = int(idx)
+            if idx <= max_id and len(feats["numeric"]) > 0:
+                mat[idx] = feats["numeric"]
         return mat
+
+    def to_matrix(self, max_id: int):
+        """
+        [N, F] tensor of all concatenated features (numeric + categorical + bucketized).
+        """
+        total_dim = self.total_dim
+        mat = torch.zeros((max_id + 1, total_dim), dtype=torch.float32)
+        for idx in range(max_id + 1):
+            mat[idx] = self.get_tensor(idx)
+        return mat
+
+    # ------------------- Properties -------------------
+    @property
+    def numeric_dim(self):
+        return len(self.numeric_cols)
+
+    @property
+    def cat_dims(self):
+        """Return vocab sizes for each categorical col (needed for nn.Embedding)."""
+        return {col: len(vocab) + 1 for col, vocab in self.cat_vocabs.items()}
+
+    @property
+    def bucket_dims(self):
+        return {col: self.bucket_bins for col in self.bucket_cols}
+
+    @property
+    def total_dim(self):
+        return len(self.numeric_cols) + len(self.cat_cols) + len(self.bucket_cols)

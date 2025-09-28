@@ -4,53 +4,96 @@ import numpy as np
 from collections import defaultdict
 from src.features.feature_store import FeatureStore
 
+
 class RankDataset(Dataset):
-    def __init__(self, ratings_df, num_items, user_features, item_features,
-                 num_negatives=5, user_emb=None, item_emb=None):
+    """
+    Ranking dataset.
+    Returns recall embeddings + user/item side features separately.
+    """
+
+    def __init__(self, ratings_df, num_items,
+                 user_store: FeatureStore, item_store: FeatureStore,
+                 num_negatives=5, user_emb=None, item_emb=None,
+                 user_feat_tensor=None, item_feat_tensor=None):
+
         self.num_items = num_items
         self.num_negatives = num_negatives
-        self.user_emb = user_emb
-        self.item_emb = item_emb
+        self.user_emb = user_emb.float() if user_emb is not None else None
+        self.item_emb = item_emb.float() if item_emb is not None else None
 
-        # feature stores
-        self.user_store = FeatureStore(user_features, "user_idx")
-        self.item_store = FeatureStore(item_features, "item_idx")
-        self.user_feat_dim = self.user_store.dim
-        self.item_feat_dim = self.item_store.dim
-        self.extra_dim = self.user_feat_dim + self.item_feat_dim
+        # Feature stores (shared with recall dataset)
+        self.user_store = user_store
+        self.item_store = item_store
 
-        # interactions
+        # Precompute dense feature matrices for fast indexing
+        if user_feat_tensor is not None:
+            self.user_feat_tensor = user_feat_tensor.float()
+        else:
+            max_user_id = max(user_store.data.keys()) if user_store.data else -1
+            self.user_feat_tensor = user_store.to_matrix(max_user_id).float()
+
+        if item_feat_tensor is not None:
+            self.item_feat_tensor = item_feat_tensor.float()
+        else:
+            max_item_id = max(item_store.data.keys()) if item_store.data else -1
+            self.item_feat_tensor = item_store.to_matrix(max_item_id).float()
+
+        # Track interactions
         self.user_item_pairs = ratings_df[["user_idx", "item_idx"]].values
         self.user_rated = defaultdict(set)
         for u, i in self.user_item_pairs:
             self.user_rated[u].add(i)
 
-        # pos + neg samples
-        self.samples = []
+        # Positive + negative samples
+        samples = []
+        rng = np.random.default_rng()
+        all_items = np.arange(num_items)
         for u, i in self.user_item_pairs:
-            self.samples.append((u, i, 1))
-            for _ in range(num_negatives):
-                j = np.random.randint(1, num_items + 1)
-                while j in self.user_rated[u]:
-                    j = np.random.randint(1, num_items + 1)
-                self.samples.append((u, j, 0))
+            samples.append((u, i, 1))
+
+            if num_negatives <= 0:
+                continue
+
+            # Sample negatives with rejection using vectorized draw
+            needed = num_negatives
+            rated = self.user_rated[u]
+            attempts = 0
+            while needed > 0:
+                draws = rng.choice(all_items, size=max(needed * 2, 8), replace=True)
+                candidates = [item for item in draws if item not in rated]
+                if not candidates:
+                    attempts += 1
+                    if attempts > 5:
+                        break
+                    continue
+                take = candidates[:needed]
+                samples.extend((u, j, 0) for j in take)
+                needed -= len(take)
+
+        samples_np = np.array(samples, dtype=np.int64)
+        self.samples = torch.from_numpy(samples_np)
+        self.labels = self.samples[:, 2].float()
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        u, i, label = self.samples[idx]
+        sample = self.samples[idx]
+        u = sample[0].item()
+        i = sample[1].item()
 
+        # Recall embeddings (frozen from two-tower)
         u_emb = self.user_emb[u]
         i_emb = self.item_emb[i]
 
-        u_feats = self.user_store.get(u)
-        i_feats = self.item_store.get(i)
-        extra_feats = torch.cat([u_feats, i_feats], dim=0).clone() if self.extra_dim > 0 else torch.zeros(0)
+        # Feature tensors (not concatenated)
+        u_feats = self.user_feat_tensor[u]
+        i_feats = self.item_feat_tensor[i]
 
-        return (
-            u_emb.float(),
-            i_emb.float(),
-            extra_feats,
-            torch.tensor(label, dtype=torch.float32)
-        )
+        return {
+            "u_emb": u_emb,
+            "i_emb": i_emb,
+            "u_feats": u_feats,
+            "i_feats": i_feats,
+            "label": self.labels[idx],
+        }
