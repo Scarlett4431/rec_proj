@@ -21,3 +21,8 @@ Ranking: continues to score the merged candidate list using the two-tower user/i
 Result:
 Hybrid Recall Eval (after hard-neg): {'recall@k': 0.23990995497748874, 'ndcg@k': 0.04662188754030811}, K = 100
 Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.03028514257128564, 'ndcg@k': 0.013483822228789712}, K = 10
+
+Version 1.3:
+Recall: Two-tower embeddings are L2-normalized, add temperature in InBatchSoftmaxLoss, default as 0.1. RecallDataset add optional easy-negatvie sampler that mixes random catalog items with hard negatives, plus cached per-user masks to keep sampling overhead low. 
+Hybrid Recall Eval (after hard-neg): {'recall@k': 0.2625412706353177, 'ndcg@k': 0.05497410929710433}, K = 100
+Currently without easy and harder neg, but change the two tower model: {'recall@k': 0.25002501250625314, 'ndcg@k': 0.048952612925014016}

@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -11,8 +12,7 @@ from src.features.feature_encoder import FeatureEncoder
 from src.features.feature_utils import (
     move_to_device,
     encode_features,
-    encode_store_batch,
-    encode_all_entities,
+    encode_cached_batch,
 )
 from src.dataset.recall_dataset import RecallDataset
 from src.dataset.rank_dataset import RankDataset
@@ -103,47 +103,76 @@ def main():
     user_multi_max = {"watched_items": 50, "favorite_genres": 3}
     item_multi_max = {"item_genres": 5}
 
+    user_feature_cache = user_store.get_batch(list(range(num_users)), max_multi_lengths=user_multi_max)
+    item_feature_cache = item_store.get_batch(list(range(num_items)), max_multi_lengths=item_multi_max)
+
     # -----------------------------
     # 4) Recall dataset & loader (warm-up)
     # -----------------------------
-    recall_ds = RecallDataset(train, user_store, item_store)
+    recall_ds = RecallDataset(
+        train,
+        user_store,
+        item_store,
+        # easy_neg_samples=3,
+        num_items=num_items,
+    )
     recall_loader = DataLoader(recall_ds, batch_size=1024, shuffle=True, drop_last=True)
 
+    tower_dropout = 0.1
     model = TwoTowerModel(
         num_users=num_users,
         num_items=num_items,
         embed_dim=64,
         user_extra_dim=user_encoder.out_dim,
         item_extra_dim=item_encoder.out_dim,
+        dropout=tower_dropout,
     ).to(device)
     opt = optim.Adam(
         list(model.parameters()) + list(user_encoder.parameters()) + list(item_encoder.parameters()),
         lr=1e-3,
+        weight_decay=1e-5,
     )
-    recall_loss = InBatchSoftmaxLoss()
+    recall_loss = InBatchSoftmaxLoss(temperature=0.1)
 
     # -----------------------------
     # 5) Warm-up recall training
     # -----------------------------
-    for epoch in range(3):
+    warmup_epochs = 6
+    for epoch in range(warmup_epochs):
         model.train()
         total_loss = 0.0
+        easy_neg_time = 0.0
         for batch in recall_loader:
             user_ids = batch["user_id"].to(device)
             pos_items = batch["pos_item"].to(device)
 
-            u_feats = encode_store_batch(user_store, user_encoder, user_ids, device, user_multi_max)
-            i_feats = encode_store_batch(item_store, item_encoder, pos_items, device, item_multi_max)
+            u_feats = encode_cached_batch(user_feature_cache, user_encoder, user_ids, device)
+            i_feats = encode_cached_batch(item_feature_cache, item_encoder, pos_items, device)
 
             opt.zero_grad()
             u_emb, v_emb = model(user_ids, pos_items,
                                  user_feats=u_feats,
                                  item_feats=i_feats)
+
+            easy_items = batch["easy_neg_items"].to(device)
+            if easy_items.numel() > 0:
+                timer_start = time.perf_counter()
+                valid_mask = easy_items >= 0
+                if valid_mask.any():
+                    easy_item_ids = easy_items[valid_mask]
+                    easy_feats = encode_cached_batch(item_feature_cache, item_encoder, easy_item_ids, device)
+                    easy_emb = model.item_embed(easy_item_ids, item_feats=easy_feats)
+                    v_emb = torch.cat([v_emb, easy_emb], dim=0)
+                easy_neg_time += time.perf_counter() - timer_start
+
             loss = recall_loss(u_emb, v_emb)
             loss.backward()
             opt.step()
             total_loss += loss.item()
-        print(f"[Recall] Warm-up Epoch {epoch + 1}, Loss = {total_loss / len(recall_loader):.4f}")
+        print(
+            f"[Recall] Warm-up Epoch {epoch + 1}/{warmup_epochs}, Loss = {total_loss / len(recall_loader):.4f}, "
+            f"easy-neg time {easy_neg_time:.3f}s"
+        )
 
     def export_embeddings():
         model.eval()
@@ -195,20 +224,24 @@ def main():
         user_store,
         item_store,
         item_emb=item_emb.detach().cpu(),
-        hard_neg_k=50,
-        hard_neg_samples=2,
+        # hard_neg_k=50,
+        # hard_neg_samples=1,
+        # easy_neg_samples=3,
+        num_items=num_items,
     )
     recall_hard_loader = DataLoader(recall_hard_ds, batch_size=512, shuffle=True, drop_last=True)
 
     for epoch in range(3):
         model.train()
         total_loss = 0.0
+        hard_neg_time = 0.0
+        easy_neg_time = 0.0
         for batch in recall_hard_loader:
             user_ids = batch["user_id"].to(device)
             pos_items = batch["pos_item"].to(device)
 
-            u_feats = encode_store_batch(user_store, user_encoder, user_ids, device, user_multi_max)
-            pos_feats = encode_store_batch(item_store, item_encoder, pos_items, device, item_multi_max)
+            u_feats = encode_cached_batch(user_feature_cache, user_encoder, user_ids, device)
+            pos_feats = encode_cached_batch(item_feature_cache, item_encoder, pos_items, device)
 
             u_emb, pos_emb = model(user_ids, pos_items,
                                    user_feats=u_feats,
@@ -217,24 +250,40 @@ def main():
 
             hard_items = batch["hard_neg_items"].to(device)
             if hard_items.numel() > 0:
+                timer_start = time.perf_counter()
                 valid_mask = hard_items >= 0
                 if valid_mask.any():
                     neg_item_ids = hard_items[valid_mask]
-                    neg_feats = encode_store_batch(item_store, item_encoder, neg_item_ids, device, item_multi_max)
+                    neg_feats = encode_cached_batch(item_feature_cache, item_encoder, neg_item_ids, device)
                     hard_emb = model.item_embed(neg_item_ids, item_feats=neg_feats)
                     v_emb = torch.cat([v_emb, hard_emb], dim=0)
+                hard_neg_time += time.perf_counter() - timer_start
+
+            easy_items = batch["easy_neg_items"].to(device)
+            if easy_items.numel() > 0:
+                timer_start = time.perf_counter()
+                valid_mask = easy_items >= 0
+                if valid_mask.any():
+                    easy_item_ids = easy_items[valid_mask]
+                    easy_feats = encode_cached_batch(item_feature_cache, item_encoder, easy_item_ids, device)
+                    easy_emb = model.item_embed(easy_item_ids, item_feats=easy_feats)
+                    v_emb = torch.cat([v_emb, easy_emb], dim=0)
+                easy_neg_time += time.perf_counter() - timer_start
 
             opt.zero_grad()
             loss = recall_loss(u_emb, v_emb)
             loss.backward()
             opt.step()
             total_loss += loss.item()
-        print(f"[Recall+HardNeg] Epoch {epoch + 1}, Loss = {total_loss / len(recall_hard_loader):.4f}")
+        print(
+            f"[Recall+HardNeg] Epoch {epoch + 1}, Loss = {total_loss / len(recall_hard_loader):.4f}, "
+            f"hard-neg time {hard_neg_time:.3f}s, easy-neg time {easy_neg_time:.3f}s"
+        )
 
     user_emb, item_emb = export_embeddings()
 
-    user_feat_matrix_cpu = encode_all_entities(user_store, user_encoder, num_users, device, user_multi_max).detach().cpu()
-    item_feat_matrix_cpu = encode_all_entities(item_store, item_encoder, num_items, device, item_multi_max).detach().cpu()
+    user_feat_matrix_cpu = encode_features(user_encoder, user_feature_cache, device).detach().cpu()
+    item_feat_matrix_cpu = encode_features(item_encoder, item_feature_cache, device).detach().cpu()
     user_feat_matrix = user_feat_matrix_cpu.to(device)
     item_feat_matrix = item_feat_matrix_cpu.to(device)
 
@@ -250,10 +299,10 @@ def main():
         popular_list = popular_user_candidates.get(u, [])
         user_candidates[u] = merge_candidate_lists(
             [
-                (faiss_candidates, 0.5),
-                (covis_list, 0.2),
-                (itemcf_list, 0.2),
-                (popular_list, 0.1),
+                (faiss_candidates, 0.4),
+                (covis_list, 0.15),
+                (itemcf_list, 0.15),
+                (popular_list, 0.15),
             ],
             candidate_k,
         )

@@ -1,3 +1,5 @@
+from typing import Dict, List
+
 import torch
 from torch.utils.data import Dataset
 import numpy as np
@@ -10,14 +12,25 @@ class RecallDataset(Dataset):
     Uses generalized FeatureStore: numeric + categorical + bucketized features.
     """
 
-    def __init__(self, ratings_df, user_store: FeatureStore, item_store: FeatureStore,
-                 item_emb=None, hard_neg_k=0, hard_neg_samples=0):
+    def __init__(
+        self,
+        ratings_df,
+        user_store: FeatureStore,
+        item_store: FeatureStore,
+        item_emb=None,
+        hard_neg_k=0,
+        hard_neg_samples=0,
+        easy_neg_samples=0,
+        num_items=None,
+    ):
         """
         ratings_df: DataFrame with [user_idx, item_idx]
         user_store, item_store: pre-built FeatureStore instances
         item_emb: torch.Tensor [num_items, d], pretrained embeddings (for mining)
         hard_neg_k: if >0, use FAISS to mine top-k neighbors as hard negative pool
         hard_neg_samples: how many to sample per positive
+        easy_neg_samples: number of random easy negatives per positive
+        num_items: total catalog size (required when easy_neg_samples > 0; inferred if None)
         """
         self.pairs = ratings_df[["user_idx", "item_idx"]].values
 
@@ -33,10 +46,24 @@ class RecallDataset(Dataset):
         for u, i in self.pairs:
             user_rated.setdefault(u, set()).add(i)
         self.user_rated = {u: frozenset(items) for u, items in user_rated.items()}
+        self.user_consumed_np = {
+            u: np.fromiter(items, dtype=np.int64, count=len(items)) if items else np.empty(0, dtype=np.int64)
+            for u, items in self.user_rated.items()
+        }
 
         self.pad_item_id = -1
         self.hard_neg_samples = hard_neg_samples
+        self.easy_neg_samples = easy_neg_samples
         self.hard_negatives = {}
+        if num_items is not None:
+            self.num_items = int(num_items)
+        elif len(self.pairs) > 0:
+            self.num_items = int(self.pairs[:, 1].max()) + 1
+        else:
+            self.num_items = 0
+        self._rng = np.random.default_rng()
+        self.user_available_cache: Dict[int, np.ndarray] = {}
+        self._catalog = np.arange(self.num_items, dtype=np.int64) if self.num_items > 0 else np.empty(0, dtype=np.int64)
 
         # Precompute item neighbors globally if requested
         if hard_neg_k > 0 and item_emb is not None:
@@ -79,6 +106,45 @@ class RecallDataset(Dataset):
             sample["hard_neg_items"] = neg_items
         else:
             sample["hard_neg_items"] = torch.full((self.hard_neg_samples,), self.pad_item_id, dtype=torch.long)
+
+        if self.easy_neg_samples > 0 and self.num_items > 0:
+            consumed = self.user_rated.get(u, frozenset())
+            consumed_np = self.user_consumed_np.get(u, np.empty(0, dtype=np.int64))
+            easy_negs: List[int] = []
+            attempts = 0
+            draw_size = max(self.easy_neg_samples * 4, self.easy_neg_samples + 8)
+            while len(easy_negs) < self.easy_neg_samples and attempts < 3:
+                draws = self._rng.integers(0, self.num_items, size=draw_size, dtype=np.int64)
+                if consumed_np.size > 0:
+                    mask = ~np.isin(draws, consumed_np, assume_unique=False)
+                else:
+                    mask = np.ones(draws.shape, dtype=bool)
+                mask &= draws != pos_item
+                filtered = draws[mask]
+                if filtered.size > 0:
+                    take = min(self.easy_neg_samples - len(easy_negs), filtered.size)
+                    easy_negs.extend(filtered[:take].tolist())
+                attempts += 1
+
+            if len(easy_negs) < self.easy_neg_samples and len(consumed) < self.num_items - 1:
+                remaining = self.easy_neg_samples - len(easy_negs)
+                available = self.user_available_cache.get(u)
+                if available is None:
+                    available = np.setdiff1d(self._catalog, consumed_np, assume_unique=True)
+                    if available.size > 0 and pos_item not in consumed:
+                        available = available[available != pos_item]
+                    self.user_available_cache[u] = available
+                if available.size > 0:
+                    replace = available.size < remaining
+                    draws = self._rng.choice(available, size=remaining, replace=replace)
+                    easy_negs.extend(draws.tolist())
+
+            if len(easy_negs) < self.easy_neg_samples:
+                easy_negs.extend([self.pad_item_id] * (self.easy_neg_samples - len(easy_negs)))
+
+            sample["easy_neg_items"] = torch.tensor(easy_negs[:self.easy_neg_samples], dtype=torch.long)
+        else:
+            sample["easy_neg_items"] = torch.full((self.easy_neg_samples,), self.pad_item_id, dtype=torch.long)
 
         return sample
 

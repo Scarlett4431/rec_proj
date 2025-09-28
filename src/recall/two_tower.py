@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-
+import torch.nn.functional as F
 
 class TwoTowerModel(nn.Module):
     """
@@ -10,17 +10,22 @@ class TwoTowerModel(nn.Module):
     """
 
     def __init__(self, num_users, num_items, embed_dim,
-                 user_extra_dim=0, item_extra_dim=0):
+                 user_extra_dim=0, item_extra_dim=0,
+                 hidden_dims=None,
+                 dropout=0.1):
         super().__init__()
         self.embed_dim = embed_dim
+        hidden_dims = hidden_dims or [embed_dim, embed_dim]
 
         # --- Embedding tables for IDs ---
         self.user_emb = nn.Embedding(num_users + 1, embed_dim)
         self.item_emb = nn.Embedding(num_items + 1, embed_dim)
 
         # --- Projection layers ---
-        self.user_proj = nn.Linear(embed_dim + user_extra_dim, embed_dim)
-        self.item_proj = nn.Linear(embed_dim + item_extra_dim, embed_dim)
+        user_input_dim = embed_dim + user_extra_dim
+        item_input_dim = embed_dim + item_extra_dim
+        self.user_mlp = self._build_mlp(user_input_dim, embed_dim, hidden_dims, dropout)
+        self.item_mlp = self._build_mlp(item_input_dim, embed_dim, hidden_dims, dropout)
 
         # Optional: normalization helps training stability
         self.user_norm = nn.LayerNorm(embed_dim)
@@ -43,11 +48,14 @@ class TwoTowerModel(nn.Module):
         if item_feats is not None and item_feats.size(1) > 0:
             i_emb = torch.cat([i_emb, item_feats], dim=1)  # [B, D+Fi]
 
-        u_emb = self.user_proj(u_emb)  # [B, D]
-        i_emb = self.item_proj(i_emb)  # [B, D]
+        u_emb = self.user_mlp(u_emb)
+        i_emb = self.item_mlp(i_emb)
 
         u_emb = self.user_norm(u_emb)
         i_emb = self.item_norm(i_emb)
+
+        u_emb = F.normalize(u_emb, p=2, dim=1)
+        i_emb = F.normalize(i_emb, p=2, dim=1)
 
         return u_emb, i_emb
 
@@ -61,8 +69,9 @@ class TwoTowerModel(nn.Module):
         u_emb = self.user_emb(user_ids)
         if user_feats is not None and user_feats.size(1) > 0:
             u_emb = torch.cat([u_emb, user_feats], dim=1)
-        u_emb = self.user_proj(u_emb)
-        return self.user_norm(u_emb)
+        u_emb = self.user_mlp(u_emb)
+        u_emb = self.user_norm(u_emb)
+        return F.normalize(u_emb, p=2, dim=1)
 
     def item_embed(self, item_ids, item_feats=None):
         """
@@ -74,5 +83,19 @@ class TwoTowerModel(nn.Module):
         i_emb = self.item_emb(item_ids)
         if item_feats is not None and item_feats.size(1) > 0:
             i_emb = torch.cat([i_emb, item_feats], dim=1)
-        i_emb = self.item_proj(i_emb)
-        return self.item_norm(i_emb)
+        i_emb = self.item_mlp(i_emb)
+        i_emb = self.item_norm(i_emb)
+        return F.normalize(i_emb, p=2, dim=1)
+
+    @staticmethod
+    def _build_mlp(input_dim, output_dim, hidden_dims, dropout):
+        layers = []
+        prev_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.GELU())
+            layers.append(nn.LayerNorm(hidden_dim))
+            layers.append(nn.Dropout(dropout))
+            prev_dim = hidden_dim
+        layers.append(nn.Linear(prev_dim, output_dim))
+        return nn.Sequential(*layers)
