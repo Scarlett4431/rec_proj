@@ -66,16 +66,16 @@ def main():
     # -----------------------------
     # 3) Build engineered features from train slice
     # -----------------------------
-    user_feats_df = build_user_features(train)
+    user_feats_df = build_user_features(train, movies)
     item_feats_df = build_item_features(train, movies)
 
     user_store = FeatureStore(
         user_feats_df,
         "user_idx",
         numeric_cols=[],
-        cat_cols=[],
-        multi_cat_cols=["watched_items"],
-        bucket_cols=["user_total_ratings", "user_avg_rating", "user_recency_days"],
+        cat_cols=["temporal_preference"],
+        multi_cat_cols=["watched_items", "favorite_genres"],
+        bucket_cols=["user_total_ratings", "user_avg_rating", "user_recency_days", "user_avg_release_year"],
         bucket_bins=10,
     )
     item_numeric_cols = ["item_total_ratings", "item_avg_rating", "item_release_year"]
@@ -109,7 +109,7 @@ def main():
         proj_dim=32,
     ).to(device)
 
-    user_multi_max = {"watched_items": 50}
+    user_multi_max = {"watched_items": 50, "favorite_genres": 3}
     item_multi_max = {"item_genres": 5}
 
     # -----------------------------
