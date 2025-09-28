@@ -15,7 +15,9 @@ Ranker Eval (Recall+Rank): {'recall@k': 0.026433216608304153, 'ndcg@k': 0.011951
 
 Version 1.2:
 User side: added favorite_genres (top-3 genre affinities) and a temporal preference signal (user_avg_release_year buckets into prefers_classics/balanced/prefers_recent) so the tower captures longer-term taste and recency bias.
-Recall pipeline: Introduced two additional recall streams—co-visitation and item-based collaborative filtering—and a generalized merge_candidate_lists helper that blends FAISS/two-tower, co-vis, and item-CF candidates (50/30/20 mix by default).
+Recall pipeline: Introduced multiple recall streams—co-visitation, item-based collaborative filtering, and a popularity prior—and a generalized merge_candidate_lists helper that blends FAISS/two-tower with co-vis, item-CF, and popularity candidates (default 45/25/20/10 split).
 FAISS index: upgraded to support ANN IVF search with fallback to exact when the catalog is small, ready for scale.
+Ranking: continues to score the merged candidate list using the two-tower user/item embeddings; the extra recall streams expand the pool without changing the embedding backbone.
 Result:
-FAISS Recall Eval (after hard-neg): {'recall@k': 0.14838419209604803, 'ndcg@k': 0.03176630032187134}
+Hybrid Recall Eval (after hard-neg): {'recall@k': 0.22536268134067033, 'ndcg@k': 0.04421326537977961}, K = 100
+Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.027803901950975488, 'ndcg@k': 0.012417552488592547}, K = 10

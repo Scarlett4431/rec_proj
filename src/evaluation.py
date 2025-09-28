@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 from src.faiss_index import FaissIndex
+from typing import Dict, List
+
 
 def recall_at_k(pred_items, true_item, k=10):
     return 1.0 if true_item in pred_items[:k] else 0.0
@@ -20,6 +22,29 @@ def evaluate_with_faiss(user_emb, item_emb, test_pairs, k=10):
         results["recall@k"].append(recall_at_k(ranked_items, true_item, k))
         results["ndcg@k"].append(ndcg_at_k(ranked_items, true_item, k))
     return {k: float(np.mean(v)) for k, v in results.items()}
+
+
+def evaluate_candidates(candidate_map, test_pairs, k=100):
+    """Evaluate recall metrics for arbitrary candidate pools."""
+    hits = []
+    ndcgs = []
+    for u, true_item in test_pairs:
+        candidates = candidate_map.get(u, [])[:k]
+        if not candidates:
+            hits.append(0.0)
+            ndcgs.append(0.0)
+            continue
+        if true_item in candidates:
+            idx = candidates.index(true_item)
+            hits.append(1.0)
+            ndcgs.append(1.0 / np.log2(idx + 2))
+        else:
+            hits.append(0.0)
+            ndcgs.append(0.0)
+    return {
+        "recall@k": float(np.mean(hits)) if hits else 0.0,
+        "ndcg@k": float(np.mean(ndcgs)) if ndcgs else 0.0,
+    }
 
 def evaluate_ranker_with_faiss(
     ranker,
@@ -82,6 +107,57 @@ def evaluate_ranker_with_faiss(
         ranked_items = [candidate_items[i] for i in ranked_idx]
 
         # 4) Metrics
+        results["recall@k"].append(recall_at_k(ranked_items, true_item, rank_k))
+        results["ndcg@k"].append(ndcg_at_k(ranked_items, true_item, rank_k))
+
+    return {k: float(np.mean(v)) for k, v in results.items()}
+
+
+def evaluate_ranker_with_candidates(
+    ranker,
+    user_emb,
+    item_emb,
+    user_candidates: Dict[int, List[int]],
+    test_pairs,
+    rank_k=10,
+    device="cpu",
+    user_feat_matrix=None,
+    item_feat_matrix=None,
+):
+    """Evaluate ranker using precomputed recall candidates."""
+
+    user_emb = user_emb.to(device)
+    item_emb = item_emb.to(device)
+    if user_feat_matrix is not None:
+        user_feat_matrix = user_feat_matrix.to(device)
+    if item_feat_matrix is not None:
+        item_feat_matrix = item_feat_matrix.to(device)
+
+    results = {"recall@k": [], "ndcg@k": []}
+
+    for u, true_item in test_pairs:
+        candidate_items = user_candidates.get(u, [])
+        if not candidate_items:
+            results["recall@k"].append(0.0)
+            results["ndcg@k"].append(0.0)
+            continue
+
+        cand_vecs = item_emb[candidate_items]
+        u_vec = user_emb[u].unsqueeze(0)
+        u_expand = u_vec.repeat(cand_vecs.size(0), 1)
+
+        u_side = i_side = None
+        if (user_feat_matrix is not None) and (item_feat_matrix is not None):
+            u_side = user_feat_matrix[u].unsqueeze(0).repeat(cand_vecs.size(0), 1)
+            i_side = item_feat_matrix[candidate_items]
+
+        with torch.no_grad():
+            scores = ranker(u_expand, cand_vecs, u_feats=u_side, i_feats=i_side)
+            scores = scores.view(-1).detach().cpu().numpy()
+
+        ranked_idx = np.argsort(-scores)[:rank_k]
+        ranked_items = [candidate_items[i] for i in ranked_idx]
+
         results["recall@k"].append(recall_at_k(ranked_items, true_item, rank_k))
         results["ndcg@k"].append(ndcg_at_k(ranked_items, true_item, rank_k))
 

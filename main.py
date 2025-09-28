@@ -8,44 +8,27 @@ from src.features.user_features import build_user_features
 from src.features.item_features import build_item_features
 from src.features.feature_store import FeatureStore
 from src.feature_encoder import FeatureEncoder
+from src.feature_utils import (
+    move_to_device,
+    encode_features,
+    encode_store_batch,
+    encode_all_entities,
+)
 from src.recall_dataset import RecallDataset
 from src.rank_dataset import RankDataset
 from src.recall.two_tower import TwoTowerModel
 from src.recall.covisitation import build_covisitation_index, build_user_covisitation_candidates
 from src.recall.item_cf import build_item_cf_index, build_user_itemcf_candidates
 from src.recall.hybrid import merge_candidate_lists
+from src.recall.popularity import build_popular_items, build_user_popularity_candidates
 from src.losses import InBatchSoftmaxLoss
 from src.rank.rank_mlp import RankerMLP
-from src.evaluation import evaluate_with_faiss, evaluate_ranker_with_faiss
+from src.evaluation import (
+    evaluate_ranker_with_candidates,
+    evaluate_candidates,
+)
 from src.utils import remap_ids, user_stratified_split
 from src.faiss_index import FaissIndex
-
-
-def move_to_device(struct, device):
-    if isinstance(struct, torch.Tensor):
-        return struct.to(device)
-    if isinstance(struct, dict):
-        return {k: move_to_device(v, device) for k, v in struct.items()}
-    return struct
-
-
-def encode_features(encoder, feature_batch, device):
-    feature_batch = move_to_device(feature_batch, device)
-    return encoder(feature_batch)
-
-
-def encode_store_batch(store, encoder, ids, device, max_lengths):
-    if isinstance(ids, torch.Tensor):
-        id_list = ids.detach().cpu().tolist()
-    else:
-        id_list = ids
-    batch = store.get_batch(id_list, max_multi_lengths=max_lengths)
-    return encode_features(encoder, batch, device)
-
-
-def encode_all_entities(store, encoder, count, device, max_lengths):
-    ids = list(range(count))
-    return encode_store_batch(store, encoder, ids, device, max_lengths)
 
 
 def main():
@@ -72,8 +55,9 @@ def main():
     user_feats_df = build_user_features(train, movies)
     item_feats_df = build_item_features(train, movies)
 
-    # covis_index = build_covisitation_index(train, max_items_per_user=50, top_k=200)
+    covis_index = build_covisitation_index(train, max_items_per_user=50, top_k=200)
     item_cf_index = build_item_cf_index(train, max_items_per_user=100, top_k=200)
+    popular_items = build_popular_items(train, top_k=500)
 
     user_store = FeatureStore(
         user_feats_df,
@@ -96,6 +80,7 @@ def main():
     )
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     user_encoder = FeatureEncoder(
         numeric_dim=user_store.numeric_dim,
@@ -183,17 +168,23 @@ def main():
 
     user_emb, item_emb = export_embeddings()
 
-    # covis_user_candidates = build_user_covisitation_candidates(
-    #     train,
-    #     covis_index,
-    #     top_k=100,
-    #     max_history=25,
-    # )
+    covis_user_candidates = build_user_covisitation_candidates(
+        train,
+        covis_index,
+        top_k=100,
+        max_history=25,
+    )
     itemcf_user_candidates = build_user_itemcf_candidates(
         train,
         item_cf_index,
         top_k=100,
         max_history=50,
+    )
+    popular_user_candidates = build_user_popularity_candidates(
+        train,
+        popular_items,
+        num_users=num_users,
+        top_k=50,
     )
 
     # -----------------------------
@@ -254,13 +245,15 @@ def main():
     for u in range(num_users):
         _, idxs = faiss_index.search(user_emb[u].detach().cpu(), k=candidate_k)
         faiss_candidates = [int(i) for i in idxs.tolist() if i >= 0]
-        # covis_list = covis_user_candidates.get(u, [])
+        covis_list = covis_user_candidates.get(u, [])
         itemcf_list = itemcf_user_candidates.get(u, [])
+        popular_list = popular_user_candidates.get(u, [])
         user_candidates[u] = merge_candidate_lists(
             [
-                (faiss_candidates, 0.6),
-                # (covis_list, 0.3),
-                (itemcf_list, 0.4),
+                (faiss_candidates, 0.5),
+                (covis_list, 0.2),
+                (itemcf_list, 0.2),
+                (popular_list, 0.1),
             ],
             candidate_k,
         )
@@ -268,8 +261,8 @@ def main():
     # -----------------------------
     # 7) Recall evaluation
     # -----------------------------
-    recall_results = evaluate_with_faiss(user_emb.cpu(), item_emb.cpu(), test_pairs, k=100)
-    print("FAISS Recall Eval (after hard-neg):", recall_results)
+    recall_results = evaluate_candidates(user_candidates, test_pairs, k=100)
+    print("Hybrid Recall Eval (after hard-neg):", recall_results)
 
     user_encoder.eval()
     item_encoder.eval()
@@ -343,18 +336,18 @@ def main():
     # -----------------------------
     ranker.eval()
     with torch.no_grad():
-        rank_results = evaluate_ranker_with_faiss(
+        rank_results = evaluate_ranker_with_candidates(
             ranker,
             user_emb.cpu(),
             item_emb.cpu(),
+            user_candidates,
             test_pairs,
-            faiss_k=100,
             rank_k=10,
             device=device,
             user_feat_matrix=user_feat_matrix_cpu,
             item_feat_matrix=item_feat_matrix_cpu,
         )
-    print("Ranker Eval (Recall+Rank):", rank_results)
+    print("Ranker Eval (Hybrid Recall+Rank):", rank_results)
 
 
 if __name__ == "__main__":
