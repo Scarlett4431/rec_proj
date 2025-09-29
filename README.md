@@ -37,13 +37,12 @@ Pure itemCF: {'recall@k': 0.3207903951975988, 'ndcg@k': 0.08738528906010223}
 Hybrid Recall Eval (after hard-neg): {'recall@k': 0.3860630315157579, 'ndcg@k': 0.09800878740993864}
 Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.04414207103551776, 'ndcg@k': 0.020137062885961527}
 
-Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.0472136068034017, 'ndcg@k': 0.021258478407250165}
-
 Version 1.5:
 Recall: two-tower model remove the hard negative finetuning, on the validation set it hurts the result.
 Feature engineering: include movie item title embedding using pretrain model: sentence-transformers/all-MiniLM-L6-v2, shrink from 384d to 64d for two-tower usage.
 Restructure the code for readability.
-
+Hybrid Recall Eval (after warm-up): {'recall@k': 0.39603801900950475, 'ndcg@k': 0.10180662470194539}
+Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.04959479739869935, 'ndcg@k': 0.02253238578323722}
 
 Next enhancement:
 1. add text embedding using sentence transformer
