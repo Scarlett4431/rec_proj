@@ -1,0 +1,19 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.env/
+.venv/
+
+# OS artifacts
+.DS_Store
+
+# # Model/cache outputs
+# cache/
+# data/cache/
+
+# Logs
+logs/
+*.log

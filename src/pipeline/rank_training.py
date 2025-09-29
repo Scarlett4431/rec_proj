@@ -79,7 +79,7 @@ def train_ranker_model(
         batch_size=config.batch_size,
         shuffle=True,
         drop_last=True,
-        pin_memory=device.type == "cuda",
+        pin_memory=device.type != "cuda",
     )
 
     user_dim = user_embeddings.shape[1]
