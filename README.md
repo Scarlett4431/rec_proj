@@ -39,10 +39,11 @@ Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.04414207103551776, 'ndcg@k': 0.
 
 Version 1.5:
 Recall: two-tower model remove the hard negative finetuning, on the validation set it hurts the result.
+Rank: Add DeepFM and DCN as baseline to replace the old rank_mlp.
 Feature engineering: include movie item title embedding using pretrain model: sentence-transformers/all-MiniLM-L6-v2, shrink from 384d to 64d for two-tower usage.
 Restructure the code for readability.
-Hybrid Recall Eval (after warm-up): {'recall@k': 0.39603801900950475, 'ndcg@k': 0.10180662470194539}
-Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.04959479739869935, 'ndcg@k': 0.02253238578323722}
+Hybrid Recall Eval (after warm-up): {'recall@k': 0.40760380190095047, 'ndcg@k': 0.10393681505170957}
+Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.05467733866933467, 'ndcg@k': 0.0254182768799728}
 
 Next enhancement:
 1. add text embedding using sentence transformer

@@ -7,7 +7,7 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from src.dataset.rank_dataset import RankDataset
-from src.rank.rank_mlp import RankerMLP
+from src.rank.dcn import DCNRanker
 from src.evaluation import evaluate_ranker_with_candidates
 
 
@@ -18,6 +18,9 @@ class RankTrainingConfig:
     lr: float = 1e-3
     num_negatives: int = 5
     rank_k: int = 10
+    cross_layers: int = 3
+    hidden_dims: tuple = (256, 128)
+    dropout: float = 0.2
 
 
 @dataclass
@@ -60,12 +63,19 @@ def train_ranker_model(
         drop_last=True,
     )
 
-    ranker = RankerMLP(
-        user_dim=user_embeddings.shape[1],
-        item_dim=item_embeddings.shape[1],
-        user_feat_dim=user_feat_matrix_cpu.shape[1] if user_feat_matrix_cpu.numel() else 0,
-        item_feat_dim=item_feat_matrix_cpu.shape[1] if item_feat_matrix_cpu.numel() else 0,
-        hidden_dim=128,
+    user_dim = user_embeddings.shape[1]
+    item_dim = item_embeddings.shape[1]
+    user_feat_dim = user_feat_matrix_cpu.shape[1] if user_feat_matrix_cpu.numel() else 0
+    item_feat_dim = item_feat_matrix_cpu.shape[1] if item_feat_matrix_cpu.numel() else 0
+
+    ranker = DCNRanker(
+        user_dim=user_dim,
+        item_dim=item_dim,
+        user_feat_dim=user_feat_dim,
+        item_feat_dim=item_feat_dim,
+        cross_layers=config.cross_layers,
+        hidden_dims=config.hidden_dims,
+        dropout=config.dropout,
     ).to(device)
 
     optimizer = optim.Adam(ranker.parameters(), lr=config.lr)

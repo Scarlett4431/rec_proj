@@ -71,7 +71,7 @@ def build_hybrid_candidates(
     sources: CandidateSources,
     candidate_k: int = 100,
     faiss_weight: float = 0.7,
-    covis_weight: float = 0.4,
+    covis_weight: float = 0,
     itemcf_weight: float = 0.5,
     popular_weight: float = 0.3,
 ) -> Dict[int, list]:

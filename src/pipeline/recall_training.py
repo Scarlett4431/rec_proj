@@ -1,6 +1,7 @@
+import copy
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -17,7 +18,7 @@ from src.recall.two_tower import TwoTowerModel
 @dataclass
 class RecallTrainingConfig:
     batch_size: int = 1024
-    warmup_epochs: int = 8
+    warmup_epochs: int = 15
     easy_neg_samples: int = 3
     embed_dim: int = 64
     tower_dropout: float = 0.1
@@ -25,6 +26,7 @@ class RecallTrainingConfig:
     tower_lr: float = 5e-3
     weight_decay: float = 1e-5
     temperature: float = 0.1
+    early_stop_patience: Optional[int] = 2
 
 
 @dataclass
@@ -117,10 +119,12 @@ def train_two_tower_model(
             )
 
             user_side = encode_features(feature_components.user_encoder, user_feats_raw, device)
+            print(f"User side shape: {user_side.shape}")
             item_side = encode_features(feature_components.item_encoder, item_feats_raw, device)
             if feature_components.item_title_dim > 0 and feature_components.item_title_proj is not None:
                 projected_titles = feature_components.item_title_proj(feature_components.item_title_embeddings)
                 item_side = torch.cat([item_side, projected_titles], dim=1)
+                print(f"Item side shape with titles: {item_side.shape}")
 
             user_emb = model.user_embed(user_ids.to(device), user_feats=user_side)
             item_emb = model.item_embed(item_ids.to(device), item_feats=item_side)
@@ -131,6 +135,11 @@ def train_two_tower_model(
 
     latest_user_emb = None
     latest_item_emb = None
+    best_user_emb = None
+    best_item_emb = None
+    best_score: Optional[float] = None
+    patience_counter = 0
+    saved_states: Dict[str, dict] = {}
 
     for epoch in range(config.warmup_epochs):
         model.train()
@@ -202,14 +211,49 @@ def train_two_tower_model(
             num_items,
             k=100,
         )
+        val_recall = val_metrics.get("recall@k", 0.0)
         print(
             f"[Recall] Warm-up Epoch {epoch + 1}/{config.warmup_epochs}, Loss = {total_loss / max(len(recall_loader), 1):.4f}, "
-            f"val_recall@100={val_metrics.get('recall@k', 0.0):.4f}, val_ndcg@100={val_metrics.get('ndcg@k', 0.0):.4f}"
+            f"val_recall@100={val_recall:.4f}, val_ndcg@100={val_metrics.get('ndcg@k', 0.0):.4f}"
         )
 
-    user_emb, item_emb = latest_user_emb, latest_item_emb
-    if user_emb is None or item_emb is None:
-        user_emb, item_emb = export_embeddings()
+        improved = best_score is None or val_recall > best_score + 1e-5
+        if improved:
+            best_score = val_recall
+            best_user_emb = latest_user_emb.detach().clone()
+            best_item_emb = latest_item_emb.detach().clone()
+            saved_states = {
+                "model": copy.deepcopy(model.state_dict()),
+                "user_encoder": copy.deepcopy(feature_components.user_encoder.state_dict()),
+                "item_encoder": copy.deepcopy(feature_components.item_encoder.state_dict()),
+            }
+            if feature_components.item_title_proj is not None:
+                saved_states["title_proj"] = copy.deepcopy(
+                    feature_components.item_title_proj.state_dict()
+                )
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if (
+                config.early_stop_patience is not None
+                and patience_counter >= config.early_stop_patience
+            ):
+                print(
+                    f"[Recall] Early stopping at epoch {epoch + 1}; best val_recall@100={best_score:.4f}"
+                )
+                break
+
+    if best_user_emb is not None and best_item_emb is not None:
+        model.load_state_dict(saved_states["model"])
+        feature_components.user_encoder.load_state_dict(saved_states["user_encoder"])
+        feature_components.item_encoder.load_state_dict(saved_states["item_encoder"])
+        if feature_components.item_title_proj is not None and "title_proj" in saved_states:
+            feature_components.item_title_proj.load_state_dict(saved_states["title_proj"])
+        user_emb, item_emb = best_user_emb, best_item_emb
+    else:
+        user_emb, item_emb = latest_user_emb, latest_item_emb
+        if user_emb is None or item_emb is None:
+            user_emb, item_emb = export_embeddings()
 
     return RecallTrainingOutputs(
         model=model,
