@@ -1,6 +1,6 @@
 import math
 from collections import defaultdict
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
@@ -61,6 +61,7 @@ def build_user_itemcf_candidates(
     item_cf_index: Dict[int, List[tuple]],
     top_k: int = 100,
     max_history: int = 50,
+    user_consumed: Optional[Dict[int, Iterable[int]]] = None,
 ) -> Dict[int, List[int]]:
     """Aggregate item-CF neighbors for each user."""
 
@@ -70,6 +71,8 @@ def build_user_itemcf_candidates(
     for user, items in user_items.items():
         recent = items[-max_history:]
         seen = set(recent)
+        if user_consumed is not None:
+            seen.update(user_consumed.get(user, ()))
         scores: Dict[int, float] = defaultdict(float)
         for item in recent:
             for neighbor, score in item_cf_index.get(item, []):
@@ -85,4 +88,3 @@ def build_user_itemcf_candidates(
         user_candidates[user] = [item for item, _ in ranked]
 
     return user_candidates
-

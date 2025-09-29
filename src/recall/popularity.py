@@ -1,4 +1,4 @@
-from typing import Dict, List
+from typing import Dict, Iterable, List, Optional
 
 import pandas as pd
 
@@ -18,6 +18,7 @@ def build_user_popularity_candidates(
     popular_items: List[int],
     num_users: int,
     top_k: int = 100,
+    user_consumed: Optional[Dict[int, Iterable[int]]] = None,
 ) -> Dict[int, List[int]]:
     """Recommend top popular items per user, filtering out consumed ones."""
 
@@ -27,7 +28,9 @@ def build_user_popularity_candidates(
 
     user_candidates: Dict[int, List[int]] = {}
     for user in range(num_users):
-        seen = user_history.get(user, set())
+        seen = set(user_history.get(user, set()))
+        if user_consumed is not None:
+            seen.update(user_consumed.get(user, ()))
         filtered = [item for item in popular_items if item not in seen]
         user_candidates[user] = filtered[:top_k]
 

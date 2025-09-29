@@ -5,65 +5,44 @@ def merge_candidate_lists(
     sources: Sequence[Tuple[Iterable[int], float]],
     k: int,
 ) -> List[int]:
-    """Blend multiple candidate sources according to provided ratios."""
+    """Blend multiple candidate sources using weighted scores instead of hard quotas."""
 
     if k <= 0 or not sources:
         return []
 
-    processed = [
-        (list(items), max(0.0, ratio))
-        for items, ratio in sources
-        if items is not None
-    ]
+    processed: List[Tuple[List[int], float]] = []
+    for items, weight in sources:
+        if items is None:
+            continue
+        item_list = list(items)
+        weight = float(weight)
+        if not item_list or weight <= 0.0:
+            continue
+        processed.append((item_list, weight))
+
     if not processed:
         return []
 
-    merged: List[int] = []
-    seen = set()
-    allocations = []
-    for _, ratio in processed:
-        allocations.append(int(ratio * k))
-    total_alloc = sum(allocations)
-    remainder = max(0, k - total_alloc)
+    scores = {}
+    best_rank = {}
+    best_source = {}
 
-    positions = [0] * len(processed)
+    for source_idx, (items, weight) in enumerate(processed):
+        for rank, item in enumerate(items):
+            contribution = weight / (rank + 1.0)
+            scores[item] = scores.get(item, 0.0) + contribution
+            if item not in best_rank or rank < best_rank[item]:
+                best_rank[item] = rank
+                best_source[item] = source_idx
 
-    for idx, (items, _ratio) in enumerate(processed):
-        target = min(allocations[idx], k - len(merged))
-        while positions[idx] < len(items) and len(merged) < k and target > 0:
-            candidate = items[positions[idx]]
-            positions[idx] += 1
-            if candidate in seen:
-                continue
-            merged.append(candidate)
-            seen.add(candidate)
-            target -= 1
+    ranked_items = sorted(
+        scores.items(),
+        key=lambda kv: (
+            -kv[1],
+            best_rank.get(kv[0], float("inf")),
+            best_source.get(kv[0], float("inf")),
+            kv[0],
+        ),
+    )
 
-    while remainder > 0 and len(merged) < k:
-        progressed = False
-        for idx, (items, _ratio) in enumerate(processed):
-            if positions[idx] >= len(items):
-                continue
-            candidate = items[positions[idx]]
-            positions[idx] += 1
-            if candidate in seen:
-                continue
-            merged.append(candidate)
-            seen.add(candidate)
-            remainder -= 1
-            progressed = True
-            if remainder == 0 or len(merged) >= k:
-                break
-        if not progressed:
-            break
-
-    for idx, (items, _ratio) in enumerate(processed):
-        while len(merged) < k and positions[idx] < len(items):
-            candidate = items[positions[idx]]
-            positions[idx] += 1
-            if candidate in seen:
-                continue
-            merged.append(candidate)
-            seen.add(candidate)
-
-    return merged
+    return [item for item, _ in ranked_items[:k]]

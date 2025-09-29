@@ -26,5 +26,12 @@ Version 1.3:
 Recall: Two-tower embeddings are L2-normalized, add temperature in InBatchSoftmaxLoss, default as 0.1. RecallDataset add optional easy-negatvie sampler that mixes random catalog items with hard negatives, plus cached per-user masks to keep sampling overhead low. 
 Hybrid Recall Eval (after hard-neg): {'recall@k': 0.2625412706353177, 'ndcg@k': 0.05497410929710433}, K = 100
 Currently without easy and harder neg, but change the two tower model: {'recall@k': 0.25002501250625314, 'ndcg@k': 0.048952612925014016}
+Hybrid search without two-tower: {'recall@k': 0.2714457228614307, 'ndcg@k': 0.06350793298392508}
+Hybrid search with two-tower: {'recall@k': 0.2744072036018009, 'ndcg@k': 0.059135587778206496}
 
-Holy shit!! without using two tower: {'recall@k': 0.2675937968984492, 'ndcg@k': 0.06396957095022068}
+Version 1.4:
+Evaluation: Remove the user's training interactions from direct FAISS search for all recall stream, previously all model have higher chances recommending user already watched movies.
+Hybrid recall: Improve on the logic, instead of enforcing integer quotas for each stream, use a weighted score then re-sort to give final outputs.
+Pure two-tower: {'recall@k': 0.35567783891945975, 'ndcg@k': 0.08762459726244512}
+Pure itemCF: {'recall@k': 0.3207903951975988, 'ndcg@k': 0.08738528906010223}
+Hybrid Recall Eval (after hard-neg): {'recall@k': 0.3860630315157579, 'ndcg@k': 0.09800878740993864}

@@ -56,6 +56,7 @@ class FeatureStore:
         # ---- Multi-categorical (lists of tokens) ----
         self.multi_cat_vocabs = {}
         self.multi_cat_data = {}
+        self.multi_cat_max_lens = {}
         for col in self.multi_cat_cols:
             tokens_series = df[col].apply(
                 lambda x: x if isinstance(x, (list, tuple)) else ([] if pd.isna(x) else [x])
@@ -65,10 +66,14 @@ class FeatureStore:
             self.multi_cat_vocabs[col] = vocab
 
             id_map = {}
+            max_len = 0
             for entity_id, tokens in zip(df[id_col], tokens_series):
                 ids = [vocab[token] for token in tokens if token in vocab]
                 id_map[int(entity_id)] = torch.tensor(ids, dtype=torch.long)
+                if len(ids) > max_len:
+                    max_len = len(ids)
             self.multi_cat_data[col] = id_map
+            self.multi_cat_max_lens[col] = max_len
 
         # ---- Build lookup ----
         self.data = {}
@@ -88,10 +93,15 @@ class FeatureStore:
                 for col in self.bucket_cols
             }
 
-            multi_cat_feats = {
-                col: self.multi_cat_data[col].get(idx, torch.zeros(0, dtype=torch.long))
-                for col in self.multi_cat_cols
-            }
+            multi_cat_feats = {}
+            for col in self.multi_cat_cols:
+                seq = self.multi_cat_data[col].get(idx, torch.zeros(0, dtype=torch.long))
+                max_len = self.multi_cat_max_lens.get(col, 0)
+                if max_len > 0:
+                    seq = seq[:max_len]
+                    if len(seq) < max_len:
+                        seq = torch.cat([seq, torch.zeros(max_len - len(seq), dtype=torch.long)])
+                multi_cat_feats[col] = seq
 
             self.data[idx] = {
                 "numeric": numeric_feats,
@@ -107,7 +117,10 @@ class FeatureStore:
             "numeric": torch.zeros(len(self.numeric_cols), dtype=torch.float32),
             "categorical": {c: torch.tensor(0, dtype=torch.long) for c in self.cat_cols},
             "bucket": {c: torch.tensor(0, dtype=torch.long) for c in self.bucket_cols},
-            "multi_categorical": {c: torch.zeros(0, dtype=torch.long) for c in self.multi_cat_cols},
+            "multi_categorical": {
+                c: torch.zeros(self.multi_cat_max_lens.get(c, 0), dtype=torch.long)
+                for c in self.multi_cat_cols
+            },
         })
 
     def get_batch(self, ids, max_multi_lengths=None):
@@ -186,6 +199,19 @@ class FeatureStore:
         numeric = feats["numeric"]
         cat = [feats["categorical"][c].float() for c in self.cat_cols]
         bucket = [feats["bucket"][c].float() for c in self.bucket_cols]
+        multi_vectors = []
+        for col in self.multi_cat_cols:
+            max_len = self.multi_cat_max_lens.get(col, 0)
+            if max_len == 0:
+                continue
+            seq = feats["multi_categorical"].get(col)
+            if seq is None or seq.numel() == 0:
+                seq = torch.zeros(max_len, dtype=torch.long)
+            else:
+                seq = seq[:max_len]
+                if seq.numel() < max_len:
+                    seq = torch.cat([seq, torch.zeros(max_len - seq.numel(), dtype=torch.long)])
+            multi_vectors.append(seq.float().view(-1))
 
         if cat:
             cat = torch.stack(cat)
@@ -197,7 +223,16 @@ class FeatureStore:
         else:
             bucket = torch.zeros(0, dtype=torch.float32)
 
-        return torch.cat([numeric, cat, bucket], dim=0)
+        if multi_vectors:
+            multi = torch.cat(multi_vectors, dim=0)
+        else:
+            multi = torch.zeros(0, dtype=torch.float32)
+
+        parts = [numeric, cat, bucket, multi]
+        parts = [p.flatten() for p in parts if p.numel() > 0]
+        if not parts:
+            return torch.zeros(0, dtype=torch.float32)
+        return torch.cat(parts, dim=0)
 
     def to_numeric_matrix(self, max_id: int):
         """[N, F] numeric features only."""
@@ -234,7 +269,8 @@ class FeatureStore:
 
     @property
     def total_dim(self):
-        return len(self.numeric_cols) + len(self.cat_cols) + len(self.bucket_cols)
+        multi_dim = sum(self.multi_cat_max_lens.values()) if self.multi_cat_max_lens else 0
+        return len(self.numeric_cols) + len(self.cat_cols) + len(self.bucket_cols) + multi_dim
 
     @property
     def multi_cat_dims(self):
