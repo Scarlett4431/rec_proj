@@ -1,9 +1,10 @@
 import time
+from collections import defaultdict
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-
+from statistics import mean
 from src.data_loader import load_movielens_1m
 from src.features.user_features import build_user_features
 from src.features.item_features import build_item_features
@@ -17,7 +18,6 @@ from src.features.feature_utils import (
 from src.dataset.recall_dataset import RecallDataset
 from src.dataset.rank_dataset import RankDataset
 from src.recall.two_tower import TwoTowerModel
-from src.recall.covisitation import build_covisitation_index, build_user_covisitation_candidates
 from src.recall.item_cf import build_item_cf_index, build_user_itemcf_candidates
 from src.recall.hybrid import merge_candidate_lists
 from src.recall.popularity import build_popular_items, build_user_popularity_candidates
@@ -52,13 +52,29 @@ def main():
     val_pairs = list(zip(val.user_idx.values.tolist(), val.item_idx.values.tolist()))
     val_users = sorted(val.user_idx.unique().tolist())
 
+    def build_user_item_map(df):
+        mapping = defaultdict(set)
+        for row in df.itertuples(index=False):
+            mapping[row.user_idx].add(row.item_idx)
+        return mapping
+
+    user_consumed = build_user_item_map(train_all)
+    val_holdout = build_user_item_map(val)
+    test_holdout = build_user_item_map(test)
+    for user, items in val_holdout.items():
+        if user in user_consumed:
+            user_consumed[user].difference_update(items)
+    for user, items in test_holdout.items():
+        if user in user_consumed:
+            user_consumed[user].difference_update(items)
+
     # -----------------------------
     # 3) Build engineered features from train slice
     # -----------------------------
     user_feats_df = build_user_features(train, movies)
     item_feats_df = build_item_features(train, movies)
 
-    covis_index = build_covisitation_index(train, max_items_per_user=50, top_k=200)
+    # covis_index = build_covisitation_index(train, max_items_per_user=50, top_k=200)
     item_cf_index = build_item_cf_index(train, max_items_per_user=100, top_k=200)
     popular_items = build_popular_items(train, top_k=500)
 
@@ -115,8 +131,11 @@ def main():
         faiss_idx = FaissIndex(item_emb_eval.detach().cpu())
         candidates = {}
         for u in val_users:
-            _, idxs = faiss_idx.search(user_emb_eval[u].detach().cpu(), k=k)
-            candidates[u] = [int(i) for i in idxs.tolist() if i >= 0]
+            consumed = user_consumed.get(u, set())
+            search_k = min(num_items, k + len(consumed)) if consumed else k
+            _, idxs = faiss_idx.search(user_emb_eval[u].detach().cpu(), k=search_k)
+            filtered = [int(i) for i in idxs.tolist() if i >= 0 and i not in consumed]
+            candidates[u] = filtered[:k]
         return evaluate_candidates(candidates, val_pairs, k=k)
 
     # -----------------------------
@@ -126,7 +145,7 @@ def main():
         train,
         user_store,
         item_store,
-        # easy_neg_samples=3,
+        easy_neg_samples=3,
         num_items=num_items,
     )
     recall_loader = DataLoader(recall_ds, batch_size=1024, shuffle=True, drop_last=True)
@@ -140,10 +159,18 @@ def main():
         item_extra_dim=item_encoder.out_dim,
         dropout=tower_dropout,
     ).to(device)
+    embedding_params = list(model.user_emb.parameters()) + list(model.item_emb.parameters())
+    tower_params = [
+        param
+        for name, param in model.named_parameters()
+        if not name.startswith("user_emb") and not name.startswith("item_emb")
+    ]
+    encoder_params = list(user_encoder.parameters()) + list(item_encoder.parameters())
     opt = optim.Adam(
-        list(model.parameters()) + list(user_encoder.parameters()) + list(item_encoder.parameters()),
-        lr=1e-3,
-        weight_decay=1e-5,
+        [
+            {"params": embedding_params, "lr": 1e-3, "weight_decay": 0.0},
+            {"params": tower_params + encoder_params, "lr": 1e-3, "weight_decay": 1e-5},
+        ]
     )
     recall_loss = InBatchSoftmaxLoss(temperature=0.1)
 
@@ -171,7 +198,7 @@ def main():
     # -----------------------------
     # 5) Warm-up recall training
     # -----------------------------
-    warmup_epochs = 15
+    warmup_epochs = 5
     latest_user_emb = None
     latest_item_emb = None
     for epoch in range(warmup_epochs):
@@ -216,23 +243,19 @@ def main():
 
     user_emb, item_emb = latest_user_emb, latest_item_emb
 
-    covis_user_candidates = build_user_covisitation_candidates(
-        train,
-        covis_index,
-        top_k=100,
-        max_history=25,
-    )
     itemcf_user_candidates = build_user_itemcf_candidates(
         train,
         item_cf_index,
-        top_k=100,
+        top_k=150,
         max_history=50,
+        user_consumed=user_consumed,
     )
     popular_user_candidates = build_user_popularity_candidates(
         train,
         popular_items,
         num_users=num_users,
-        top_k=50,
+        top_k=100,
+        user_consumed=user_consumed,
     )
 
     # -----------------------------
@@ -243,8 +266,8 @@ def main():
         user_store,
         item_store,
         item_emb=item_emb.detach().cpu(),
-        # hard_neg_k=50,
-        # hard_neg_samples=1,
+        hard_neg_k=50,
+        hard_neg_samples=1,
         # easy_neg_samples=3,
         num_items=num_items,
     )
@@ -319,17 +342,18 @@ def main():
     faiss_index = FaissIndex(item_emb.detach().cpu())
     user_candidates = {}
     for u in range(num_users):
-        _, idxs = faiss_index.search(user_emb[u].detach().cpu(), k=candidate_k)
-        faiss_candidates = [int(i) for i in idxs.tolist() if i >= 0]
-        covis_list = covis_user_candidates.get(u, [])
+        consumed = user_consumed.get(u, set())
+        search_k = min(num_items, candidate_k + len(consumed)) if consumed else candidate_k
+        _, idxs = faiss_index.search(user_emb[u].detach().cpu(), k=search_k)
+        faiss_filtered = [int(i) for i in idxs.tolist() if i >= 0 and i not in consumed]
+        faiss_candidates = faiss_filtered[:candidate_k]
         itemcf_list = itemcf_user_candidates.get(u, [])
         popular_list = popular_user_candidates.get(u, [])
         user_candidates[u] = merge_candidate_lists(
             [
-                (faiss_candidates, 0.4),
-                (covis_list, 0.15),
-                (itemcf_list, 0.15),
-                (popular_list, 0.15),
+                (faiss_candidates, 0.7),
+                (itemcf_list, 0.5),
+                (popular_list, 0.3),
             ],
             candidate_k,
         )
