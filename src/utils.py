@@ -1,3 +1,5 @@
+from collections import defaultdict
+
 import pandas as pd
 import numpy as np
 
@@ -56,3 +58,18 @@ def user_stratified_split(ratings, test_frac=0.1, random_state=42, min_test_item
     test_df = pd.concat(test_parts).sort_index().reset_index(drop=True) if test_parts else pd.DataFrame(columns=ratings.columns)
 
     return train_df, test_df
+
+
+def build_user_item_map(df: pd.DataFrame, user_col: str = "user_idx", item_col: str = "item_idx"):
+    """Return dict mapping each user to the set of interacted item indices."""
+
+    interactions = defaultdict(set)
+    if df.empty:
+        return interactions
+
+    users = df[user_col].to_numpy()
+    items = df[item_col].to_numpy()
+    for u, i in zip(users, items):
+        interactions[int(u)].add(int(i))
+
+    return interactions
