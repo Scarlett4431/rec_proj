@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import torch
 import torch.nn as nn
@@ -14,13 +14,14 @@ from src.evaluation import evaluate_ranker_with_candidates
 @dataclass
 class RankTrainingConfig:
     batch_size: int = 512
-    epochs: int = 3
+    epochs: int = 10
     lr: float = 1e-3
     num_negatives: int = 5
     rank_k: int = 10
     cross_layers: int = 3
     hidden_dims: tuple = (256, 128)
     dropout: float = 0.2
+    early_stop_patience: Optional[int] = 2
 
 
 @dataclass
@@ -31,6 +32,7 @@ class RankTrainingOutputs:
 
 def train_ranker_model(
     train_df,
+    val_pairs: List[Tuple[int, int]],
     num_items: int,
     user_store,
     item_store,
@@ -43,16 +45,32 @@ def train_ranker_model(
     device: torch.device,
     config: RankTrainingConfig = RankTrainingConfig(),
 ) -> RankTrainingOutputs:
+    user_emb_cpu = user_embeddings.detach().cpu()
+    item_emb_cpu = item_embeddings.detach().cpu()
+    user_feat_cpu = user_feat_matrix_cpu.detach().cpu()
+    item_feat_cpu = item_feat_matrix_cpu.detach().cpu()
+
+    if device.type == "cuda":
+        user_emb_train = user_emb_cpu.to(device)
+        item_emb_train = item_emb_cpu.to(device)
+        user_feat_train = user_feat_cpu.to(device)
+        item_feat_train = item_feat_cpu.to(device)
+    else:
+        user_emb_train = user_emb_cpu
+        item_emb_train = item_emb_cpu
+        user_feat_train = user_feat_cpu
+        item_feat_train = item_feat_cpu
+
     rank_dataset = RankDataset(
         ratings_df=train_df,
         num_items=num_items,
         user_store=user_store,
         item_store=item_store,
         num_negatives=config.num_negatives,
-        user_emb=user_embeddings.detach().cpu(),
-        item_emb=item_embeddings.detach().cpu(),
-        user_feat_tensor=user_feat_matrix_cpu,
-        item_feat_tensor=item_feat_matrix_cpu,
+        user_emb=user_emb_train,
+        item_emb=item_emb_train,
+        user_feat_tensor=user_feat_train,
+        item_feat_tensor=item_feat_train,
         user_candidates=user_candidates,
     )
 
@@ -61,12 +79,13 @@ def train_ranker_model(
         batch_size=config.batch_size,
         shuffle=True,
         drop_last=True,
+        pin_memory=device.type == "cuda",
     )
 
     user_dim = user_embeddings.shape[1]
     item_dim = item_embeddings.shape[1]
-    user_feat_dim = user_feat_matrix_cpu.shape[1] if user_feat_matrix_cpu.numel() else 0
-    item_feat_dim = item_feat_matrix_cpu.shape[1] if item_feat_matrix_cpu.numel() else 0
+    user_feat_dim = user_feat_cpu.shape[1] if user_feat_cpu.numel() else 0
+    item_feat_dim = item_feat_cpu.shape[1] if item_feat_cpu.numel() else 0
 
     ranker = DCNRanker(
         user_dim=user_dim,
@@ -80,6 +99,10 @@ def train_ranker_model(
 
     optimizer = optim.Adam(ranker.parameters(), lr=config.lr)
     loss_fn = nn.BCELoss()
+
+    best_metrics: Optional[Dict[str, float]] = None
+    best_state = None
+    patience_counter = 0
 
     for epoch in range(config.epochs):
         ranker.train()
@@ -98,18 +121,55 @@ def train_ranker_model(
             total_loss += loss.item()
         print(f"[Rank] Epoch {epoch + 1}, Loss = {total_loss / max(len(rank_loader), 1):.4f}")
 
-    ranker.eval()
-    with torch.no_grad():
-        metrics = evaluate_ranker_with_candidates(
-            ranker,
-            user_embeddings.cpu(),
-            item_embeddings.cpu(),
-            user_candidates,
-            test_pairs,
-            rank_k=config.rank_k,
-            device=device,
-            user_feat_matrix=user_feat_matrix_cpu,
-            item_feat_matrix=item_feat_matrix_cpu,
-        )
+        ranker.eval()
+        with torch.no_grad():
+            val_metrics = evaluate_ranker_with_candidates(
+                ranker,
+                user_emb_cpu,
+                item_emb_cpu,
+                user_candidates,
+                val_pairs,
+                rank_k=config.rank_k,
+                device=device,
+                user_feat_matrix=user_feat_cpu,
+                item_feat_matrix=item_feat_cpu,
+            )
+
+        val_recall = val_metrics.get("recall@k", 0.0)
+        print(f"[Rank] Val recall@{config.rank_k} = {val_recall:.4f}")
+
+        if best_metrics is None or val_recall > best_metrics.get("recall@k", 0.0) + 1e-5:
+            best_metrics = val_metrics
+            best_state = ranker.state_dict()
+            patience_counter = 0
+        else:
+            patience_counter += 1
+            if (
+                config.early_stop_patience is not None
+                and patience_counter >= config.early_stop_patience
+            ):
+                print(
+                    f"[Rank] Early stopping at epoch {epoch + 1}; best val recall@{config.rank_k}="
+                    f"{best_metrics.get('recall@k', 0.0):.4f}"
+                )
+                break
+
+    if best_state is not None:
+        ranker.load_state_dict(best_state)
+        metrics = best_metrics
+    else:
+        ranker.eval()
+        with torch.no_grad():
+            metrics = evaluate_ranker_with_candidates(
+                ranker,
+                user_emb_cpu,
+                item_emb_cpu,
+                user_candidates,
+                test_pairs,
+                rank_k=config.rank_k,
+                device=device,
+                user_feat_matrix=user_feat_cpu,
+                item_feat_matrix=item_feat_cpu,
+            )
 
     return RankTrainingOutputs(ranker=ranker, metrics=metrics)

@@ -129,6 +129,7 @@ def main():
 
     rank_outputs = train_ranker_model(
         data.train,
+        data.val_pairs,
         data.num_items,
         feature_components.user_store,
         feature_components.item_store,

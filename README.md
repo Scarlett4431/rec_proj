@@ -42,10 +42,7 @@ Recall: two-tower model remove the hard negative finetuning, on the validation s
 Rank: Add DeepFM and DCN as baseline to replace the old rank_mlp.
 Feature engineering: include movie item title embedding using pretrain model: sentence-transformers/all-MiniLM-L6-v2, shrink from 384d to 64d for two-tower usage.
 Restructure the code for readability.
+Result:
 Hybrid Recall Eval (after warm-up): {'recall@k': 0.40760380190095047, 'ndcg@k': 0.10393681505170957}
-Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.05467733866933467, 'ndcg@k': 0.0254182768799728}
-
-Next enhancement:
-1. add text embedding using sentence transformer
-2. Potentially add GraphSAGE as a recall stream??
-3. New baseline using Wide N Deep for ranking.
+Using DeepFM: Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.05467733866933467, 'ndcg@k': 0.0254182768799728}
+Using DCN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.06407203601800901, 'ndcg@k': 0.03007650543344327}
