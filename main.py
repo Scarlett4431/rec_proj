@@ -15,7 +15,12 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
+    import time
+
+    start_time = time.time()
     data = load_and_prepare_data("data/ml-1m")
+    print(f"[Timing] Data prep took {time.time() - start_time:.2f}s")
+    step_time = time.time()
     feature_components = build_feature_components(
         data.train,
         data.movies,
@@ -23,6 +28,7 @@ def main():
         num_items=data.num_items,
         device=device,
     )
+    print(f"[Timing] Feature components built in {time.time() - step_time:.2f}s")
 
     debug_feature_usage(
         "user",
@@ -41,9 +47,10 @@ def main():
     )
 
     cache_dir = Path("cache/recall_outputs")
+    step_time = time.time()
     cache_data = load_recall_cache(cache_dir)
-    # if cache_data is not None:
-    if False:
+    print(f"[Timing] Cache lookup took {time.time() - step_time:.2f}s")
+    if cache_data is not None:
         print("Loaded recall artifacts from cache.")
         (
             user_embeddings,
@@ -53,6 +60,7 @@ def main():
             user_candidates,
         ) = cache_data
     else:
+        step_time = time.time()
         recall_outputs = train_two_tower_model(
             data.train,
             data.num_users,
@@ -64,16 +72,20 @@ def main():
             device,
             config=RecallTrainingConfig(),
         )
+        print(f"[Timing] Recall training took {time.time() - step_time:.2f}s")
 
         user_embeddings = recall_outputs.user_embeddings
         item_embeddings = recall_outputs.item_embeddings
 
+        step_time = time.time()
         candidate_sources = build_candidate_sources(
             data.train,
             data.num_users,
             data.user_consumed,
         )
+        print(f"[Timing] Candidate sources built in {time.time() - step_time:.2f}s")
 
+        step_time = time.time()
         user_candidates = build_hybrid_candidates(
             user_embeddings,
             item_embeddings,
@@ -84,6 +96,7 @@ def main():
             itemcf_weight=0.5,
             popular_weight=0.3,
         )
+        print(f"[Timing] Hybrid candidate building took {time.time() - step_time:.2f}s")
 
         recall_results = evaluate_candidates(user_candidates, data.test_pairs, k=100)
         print("Hybrid Recall Eval (after warm-up):", recall_results)
@@ -119,6 +132,7 @@ def main():
         else:
             item_feat_matrix_cpu = item_feat_encoded
 
+        cache_save_time = time.time()
         save_recall_cache(
             cache_dir,
             user_embeddings,
@@ -127,7 +141,10 @@ def main():
             item_feat_matrix_cpu,
             user_candidates,
         )
-        print("Saved recall artifacts to cache.")
+        print(
+            f"Saved recall artifacts to cache (took {time.time() - cache_save_time:.2f}s)."
+        )
+    step_time = time.time()
     rank_outputs = train_ranker_model(
         data.train,
         data.val_pairs,
@@ -144,6 +161,7 @@ def main():
         device,
         config=RankTrainingConfig(),
     )
+    print(f"[Timing] Rank training took {time.time() - step_time:.2f}s")
 
     print("Ranker Eval (Hybrid Recall+Rank):", rank_outputs.metrics)
 

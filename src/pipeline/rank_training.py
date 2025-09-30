@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from typing import Dict, List, Tuple, Optional
-
+import time
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -167,6 +167,10 @@ def train_ranker_model(
     for epoch in range(config.epochs):
         ranker.train()
         total_loss = 0.0
+        history_time = 0.0
+        forward_time = 0.0
+        backward_time = 0.0
+        epoch_start = time.time()
         for batch in rank_loader:
             optimizer.zero_grad()
             u_emb_batch = batch["u_emb"].to(device)
@@ -175,32 +179,52 @@ def train_ranker_model(
             i_feats_batch = batch["i_feats"].to(device)
 
             if use_history:
+                t_hist = time.time()
                 hist_items = batch["hist_items"].to(device)
                 hist_mask = hist_items >= 0
                 hist_indices = hist_items.clone()
                 hist_indices[~hist_mask] = 0
                 hist_emb = item_emb_train[hist_indices.long()]
                 hist_emb = hist_emb * hist_mask.unsqueeze(-1)
+                history_time += time.time() - t_hist
             else:
                 hist_emb = None
                 hist_mask = None
 
-            preds = ranker(
-                u_emb_batch,
-                i_emb_batch,
-                u_feats=u_feats_batch,
-                i_feats=i_feats_batch,
-                hist_emb=hist_emb,
-                hist_mask=hist_mask,
-            )
+            t_fwd = time.time()
+            if use_history:
+                preds = ranker(
+                    u_emb_batch,
+                    i_emb_batch,
+                    u_feats=u_feats_batch,
+                    i_feats=i_feats_batch,
+                    hist_emb=hist_emb,
+                    hist_mask=hist_mask,
+                )
+            else:
+                preds = ranker(
+                    u_emb_batch,
+                    i_emb_batch,
+                    u_feats=u_feats_batch,
+                    i_feats=i_feats_batch,
+                )
+            forward_time += time.time() - t_fwd
             loss = loss_fn(preds, batch["label"].to(device))
+            t_bwd = time.time()
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+            backward_time += time.time() - t_bwd
+        epoch_time = time.time() - epoch_start
         print(f"[Rank] Epoch {epoch + 1}, Loss = {total_loss / max(len(rank_loader), 1):.4f}")
+        print(
+            f"[Timing][Rank] Epoch {epoch + 1} took {epoch_time:.2f}s "
+            f"(history {history_time:.2f}s | forward {forward_time:.2f}s | backward {backward_time:.2f}s)"
+        )
 
         ranker.eval()
         with torch.no_grad():
+            eval_start = time.time()
             val_metrics = evaluate_ranker_with_candidates(
                 ranker,
                 user_emb_cpu,
@@ -214,9 +238,16 @@ def train_ranker_model(
                 user_histories=user_histories,
                 max_history=rank_dataset.max_history,
             )
+            eval_time = time.time() - eval_start
 
         val_recall = val_metrics.get("recall@k", 0.0)
-        print(f"[Rank] Val recall@{config.rank_k} = {val_recall:.4f}")
+        val_ndcg = val_metrics.get("ndcg@k", 0.0)
+        val_gauc = val_metrics.get("gauc@k", 0.0)
+        print(
+            f"[Rank] Val metrics @ {config.rank_k}: "
+            f"recall={val_recall:.4f}, ndcg={val_ndcg:.4f}, gauc={val_gauc:.4f}"
+        )
+        print(f"[Timing][Rank] Validation took {eval_time:.2f}s")
 
         if best_metrics is None or val_recall > best_metrics.get("recall@k", 0.0) + 1e-5:
             best_metrics = val_metrics
@@ -240,6 +271,7 @@ def train_ranker_model(
     else:
         ranker.eval()
         with torch.no_grad():
+            eval_start = time.time()
             metrics = evaluate_ranker_with_candidates(
                 ranker,
                 user_emb_cpu,
@@ -253,5 +285,6 @@ def train_ranker_model(
                 user_histories=user_histories,
                 max_history=rank_dataset.max_history,
             )
+            print(f"[Timing][Rank] Test evaluation took {time.time() - eval_start:.2f}s")
 
     return RankTrainingOutputs(ranker=ranker, metrics=metrics)

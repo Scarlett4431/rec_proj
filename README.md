@@ -51,12 +51,15 @@ Rank:
 
 
 Version 1.6:
-Rank: Add DIN as baseline. RankDataset now logs user;s most recent interations.
+Rank: Add DIN as baseline. RankDataset now logs users most recent interations.
     Using DIN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.07139681692895883, 'ndcg@k': 0.03401337771569224}
     Using DIN+DCN: 
     Using SASRec:
 Feature engineering: Use two binning schemes, equal-width for score based features, log power for long tail count based features. Add rating variance as a feature.
 Recall: {'recall@k': 0.41360680340170086, 'ndcg@k': 0.10507680135862946}
+Evaluation: Add Hit rate for recall and GAUC for ranking.
+
+
 TODO:
 1. Add time info into the seqence modeling.
-2. MMOE for two tasks: one on engagement/ CTR proxy; one on satifaction/ rating quality.
+2. MMOE/PLE/ESSM for two tasks: one on engagement/ CTR proxy; one on satifaction/ rating quality.

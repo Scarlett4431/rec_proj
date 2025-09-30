@@ -144,11 +144,16 @@ def train_two_tower_model(
     for epoch in range(config.warmup_epochs):
         model.train()
         total_loss = 0.0
+        encoder_time = 0.0
+        forward_time = 0.0
+        backward_time = 0.0
+        epoch_start = time.time()
 
         for batch in recall_loader:
             user_ids = batch["user_id"].to(device)
             pos_items = batch["pos_item"].to(device)
 
+            t0 = time.time()
             user_feats = encode_cached_batch(
                 feature_components.user_feature_cache,
                 feature_components.user_encoder,
@@ -166,7 +171,9 @@ def train_two_tower_model(
                     feature_components.item_title_embeddings[pos_items]
                 )
                 item_feats = torch.cat([item_feats, projected_titles], dim=1)
+            encoder_time += time.time() - t0
 
+            t0 = time.time()
             optimizer.zero_grad()
             user_out, pos_out = model(
                 user_ids,
@@ -174,6 +181,7 @@ def train_two_tower_model(
                 user_feats=user_feats,
                 item_feats=item_feats,
             )
+            forward_time += time.time() - t0
 
             neg_items = batch["easy_neg_items"].to(device)
             if neg_items.numel() > 0:
@@ -196,10 +204,12 @@ def train_two_tower_model(
                     pos_out = torch.cat([pos_out, neg_emb], dim=0)
                 _ = time.perf_counter() - timer_start
 
+            t0 = time.time()
             loss = loss_fn(user_out, pos_out)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
+            backward_time += time.time() - t0
 
         latest_user_emb, latest_item_emb = export_embeddings()
         val_metrics = evaluate_filtered_faiss(
@@ -215,6 +225,11 @@ def train_two_tower_model(
         print(
             f"[Recall] Warm-up Epoch {epoch + 1}/{config.warmup_epochs}, Loss = {total_loss / max(len(recall_loader), 1):.4f}, "
             f"val_recall@100={val_recall:.4f}, val_ndcg@100={val_metrics.get('ndcg@k', 0.0):.4f}"
+        )
+        epoch_time = time.time() - epoch_start
+        print(
+            f"[Timing][Recall] Epoch {epoch + 1} took {epoch_time:.2f}s "
+            f"(encode {encoder_time:.2f}s | forward {forward_time:.2f}s | backward {backward_time:.2f}s)"
         )
 
         improved = best_score is None or val_recall > best_score + 1e-5

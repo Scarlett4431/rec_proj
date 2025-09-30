@@ -34,6 +34,7 @@ def evaluate_candidates(candidate_map, test_pairs, k=100):
     return {
         "recall@k": float(np.mean(hits)) if hits else 0.0,
         "ndcg@k": float(np.mean(ndcgs)) if ndcgs else 0.0,
+        "hit_rate@k": float(np.mean(hits)) if hits else 0.0,
     }
 
 
@@ -91,7 +92,7 @@ def evaluate_ranker_with_candidates(
     if item_feat_matrix is not None:
         item_feat_matrix = item_feat_matrix.to(device)
 
-    results = {"recall@k": [], "ndcg@k": []}
+    results = {"recall@k": [], "ndcg@k": [], "gauc@k": []}
 
     for u, true_item in test_pairs:
         candidate_items = user_candidates.get(u, [])
@@ -125,20 +126,38 @@ def evaluate_ranker_with_candidates(
             hist_mask = hist_mask.unsqueeze(0).expand(cand_vecs.size(0), -1)
 
         with torch.no_grad():
-            scores = ranker(
-                u_expand,
-                cand_vecs,
-                u_feats=u_side,
-                i_feats=i_side,
-                hist_emb=hist_emb,
-                hist_mask=hist_mask,
-            )
-            scores = scores.view(-1).detach().cpu().numpy()
+            if getattr(ranker, "requires_history", False):
+                scores_tensor = ranker(
+                    u_expand,
+                    cand_vecs,
+                    u_feats=u_side,
+                    i_feats=i_side,
+                    hist_emb=hist_emb,
+                    hist_mask=hist_mask,
+                )
+            else:
+                scores_tensor = ranker(
+                    u_expand,
+                    cand_vecs,
+                    u_feats=u_side,
+                    i_feats=i_side,
+                )
+            scores = scores_tensor.view(-1).detach().cpu().numpy()
 
         ranked_idx = np.argsort(-scores)[:rank_k]
         ranked_items = [candidate_items[i] for i in ranked_idx]
 
         results["recall@k"].append(recall_at_k(ranked_items, true_item, rank_k))
         results["ndcg@k"].append(ndcg_at_k(ranked_items, true_item, rank_k))
+
+        if true_item in candidate_items and len(candidate_items) > 1:
+            pos_idx = candidate_items.index(true_item)
+            pos_score = scores[pos_idx]
+            neg_scores = np.delete(scores, pos_idx)
+            if neg_scores.size > 0:
+                better = np.sum(pos_score > neg_scores)
+                ties = np.sum(np.isclose(pos_score, neg_scores))
+                auc = (better + 0.5 * ties) / neg_scores.size
+                results["gauc@k"].append(float(auc))
 
     return {k: float(np.mean(v)) for k, v in results.items()}
