@@ -51,3 +51,8 @@ Using DCN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.06407203601800901
 Version 1.6:
 Rank: Add DIN as baseline. RankDataset now logs user;s most recent interations.
 Using DIN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.07139681692895883, 'ndcg@k': 0.03401337771569224}
+
+
+TODO:
+1. Implement SASREC, DIN+DCN.
+2. MMOE for two tasks: one on engagement/ CTR proxy; one on satifaction/ rating quality.

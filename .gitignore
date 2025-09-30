@@ -3,7 +3,6 @@ __pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.pyd
 *.so
 *.cpython-*
 # Virtual environments
@@ -21,3 +20,4 @@ __pycache__/
 logs/
 *.log
 
+src/__pycache__/evaluation.cpython-312.pyc

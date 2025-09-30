@@ -10,6 +10,8 @@ from src.dataset.rank_dataset import RankDataset
 from src.rank.dcn import DCNRanker
 from src.rank.din import DINRanker
 from src.rank.deepfm import DeepFM
+from src.rank.sasrec import SASRecRanker
+from src.rank.dcn_din import DCNDINRanker
 from src.evaluation import evaluate_ranker_with_candidates
 
 
@@ -20,11 +22,13 @@ class RankTrainingConfig:
     lr: float = 1e-3
     num_negatives: int = 5
     rank_k: int = 10
-    model_type: str = "dcn"  # choices: dcn, din, deepfm
+    model_type: str = "dcn_din"  # choices: dcn, din, deepfm, sasrec, dcn_din
     cross_layers: int = 3
     hidden_dims: tuple = (256, 128)
     dropout: float = 0.2
     attention_hidden: tuple = (64, 32)
+    sasrec_heads: int = 2
+    sasrec_layers: int = 2
     fm_dim: int = 32
     early_stop_patience: Optional[int] = 2
 
@@ -104,6 +108,17 @@ def train_ranker_model(
             dnn_hidden=config.hidden_dims,
             dropout=config.dropout,
         ).to(device)
+    elif model_type == "sasrec":
+        ranker = SASRecRanker(
+            user_dim=user_dim,
+            item_dim=item_dim,
+            user_feat_dim=user_feat_dim,
+            item_feat_dim=item_feat_dim,
+            max_history=rank_dataset.max_history,
+            num_heads=config.sasrec_heads,
+            num_layers=config.sasrec_layers,
+            dropout=config.dropout,
+        ).to(device)
     elif model_type == "deepfm":
         ranker = DeepFM(
             user_dim=user_dim,
@@ -111,6 +126,18 @@ def train_ranker_model(
             user_feat_dim=user_feat_dim,
             item_feat_dim=item_feat_dim,
             fm_dim=config.fm_dim,
+            hidden_dims=config.hidden_dims,
+            dropout=config.dropout,
+        ).to(device)
+    elif model_type == "dcn_din":
+        ranker = DCNDINRanker(
+            user_dim=user_dim,
+            item_dim=item_dim,
+            user_feat_dim=user_feat_dim,
+            item_feat_dim=item_feat_dim,
+            max_history=rank_dataset.max_history,
+            cross_layers=config.cross_layers,
+            attention_hidden=config.attention_hidden,
             hidden_dims=config.hidden_dims,
             dropout=config.dropout,
         ).to(device)
