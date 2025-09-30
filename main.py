@@ -42,7 +42,8 @@ def main():
 
     cache_dir = Path("cache/recall_outputs")
     cache_data = load_recall_cache(cache_dir)
-    if cache_data is not None:
+    # if cache_data is not None:
+    if False:
         print("Loaded recall artifacts from cache.")
         (
             user_embeddings,
@@ -126,7 +127,7 @@ def main():
             item_feat_matrix_cpu,
             user_candidates,
         )
-
+        print("Saved recall artifacts to cache.")
     rank_outputs = train_ranker_model(
         data.train,
         data.val_pairs,

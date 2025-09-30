@@ -45,11 +45,22 @@ def build_feature_components(
         numeric_cols=[],
         cat_cols=["temporal_preference"],
         multi_cat_cols=["watched_items", "favorite_genres"],
-        bucket_cols=["user_total_ratings", "user_avg_rating", "user_recency_days", "user_avg_release_year"],
+        bucket_cols=[
+            "user_total_ratings",
+            "user_avg_rating",
+            "user_rating_variance",
+            "user_recency_days",
+            "user_avg_release_year",
+        ],
         bucket_bins=10,
+        bucket_strategies={
+            "user_total_ratings": "log",
+            "user_rating_variance": "linear",
+            "user_recency_days": "log",
+        },
     )
 
-    item_numeric_cols = ["item_total_ratings", "item_avg_rating", "item_release_year"]
+    item_numeric_cols = ["item_total_ratings", "item_avg_rating", "item_release_year", "item_rating_variance"]
     item_store = FeatureStore(
         item_feats_df,
         "item_idx",
@@ -58,6 +69,10 @@ def build_feature_components(
         multi_cat_cols=["item_genres"],
         bucket_cols=item_numeric_cols,
         bucket_bins=10,
+        bucket_strategies={
+            "item_total_ratings": "log",
+            "item_rating_variance": "linear",
+        },
     )
 
     user_encoder = FeatureEncoder(

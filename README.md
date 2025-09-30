@@ -43,16 +43,20 @@ Rank: Add DeepFM and DCN as baseline to replace the old rank_mlp.
 Feature engineering: include movie item title embedding using pretrain model: sentence-transformers/all-MiniLM-L6-v2, shrink from 384d to 64d for two-tower usage.
 Restructure the code for readability.
 Result:
+Recall:
 Hybrid Recall Eval (after warm-up): {'recall@k': 0.40760380190095047, 'ndcg@k': 0.10393681505170957}
-Using DeepFM: Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.05467733866933467, 'ndcg@k': 0.0254182768799728}
-Using DCN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.06407203601800901, 'ndcg@k': 0.03007650543344327}
+Rank:
+    Using DeepFM: Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.05467733866933467, 'ndcg@k': 0.0254182768799728}
+    Using DCN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.06407203601800901, 'ndcg@k': 0.03007650543344327}
 
 
 Version 1.6:
 Rank: Add DIN as baseline. RankDataset now logs user;s most recent interations.
-Using DIN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.07139681692895883, 'ndcg@k': 0.03401337771569224}
-
-
+    Using DIN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.07139681692895883, 'ndcg@k': 0.03401337771569224}
+    Using DIN+DCN: 
+    Using SASRec:
+Feature engineering: Use two binning schemes, equal-width for score based features, log power for long tail count based features. Add rating variance as a feature.
+Recall: {'recall@k': 0.41360680340170086, 'ndcg@k': 0.10507680135862946}
 TODO:
-1. Implement SASREC, DIN+DCN.
+1. Add time info into the seqence modeling.
 2. MMOE for two tasks: one on engagement/ CTR proxy; one on satifaction/ rating quality.

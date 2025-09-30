@@ -4,8 +4,10 @@ import pandas as pd
 def build_item_features(ratings, movies):
     item_stats = ratings.groupby("item_idx").agg(
         item_total_ratings=("rating", "count"),
-        item_avg_rating=("rating", "mean")
+        item_avg_rating=("rating", "mean"),
+        item_rating_variance=("rating", "var")
     ).reset_index()
+    item_stats["item_rating_variance"] = item_stats["item_rating_variance"].fillna(0.0)
 
     movies = movies.copy()
 

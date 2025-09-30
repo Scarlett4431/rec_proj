@@ -19,10 +19,10 @@ from src.evaluation import evaluate_ranker_with_candidates
 class RankTrainingConfig:
     batch_size: int = 512
     epochs: int = 10
-    lr: float = 1e-3
+    lr: float = 5e-3
     num_negatives: int = 5
     rank_k: int = 10
-    model_type: str = "dcn_din"  # choices: dcn, din, deepfm, sasrec, dcn_din
+    model_type: str = "din"  # choices: dcn, din, deepfm, sasrec, dcn_din
     cross_layers: int = 3
     hidden_dims: tuple = (256, 128)
     dropout: float = 0.2

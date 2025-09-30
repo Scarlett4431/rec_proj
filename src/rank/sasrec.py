@@ -37,7 +37,7 @@ class SASRecRanker(nn.Module):
 
         self.user_project = nn.Linear(user_dim, item_dim)
 
-        dnn_input_dim = item_dim + item_dim + user_feat_dim + item_feat_dim  # hist_rep, target_emb, side feats
+        dnn_input_dim = item_dim * 3 + user_feat_dim + item_feat_dim  # hist_rep, target_emb, user_proj, side feats
         self.dnn = nn.Sequential(
             nn.Linear(dnn_input_dim, 128),
             nn.ReLU(),

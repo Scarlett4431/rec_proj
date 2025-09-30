@@ -10,8 +10,10 @@ def build_user_features(ratings, movies, top_k_genres=3, temporal_margin=5.0):
     user_basic = ratings.groupby("user_idx").agg(
         user_total_ratings=("rating", "count"),
         user_avg_rating=("rating", "mean"),
+        user_rating_variance=("rating", "var"),
         last_rating=("timestamp", "max")
     ).reset_index()
+    user_basic["user_rating_variance"] = user_basic["user_rating_variance"].fillna(0.0)
     user_basic["user_recency_days"] = (max_date - user_basic["last_rating"]).dt.days
     user_basic = user_basic.drop(columns=["last_rating"])
 

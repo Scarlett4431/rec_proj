@@ -2,7 +2,6 @@ import torch
 from torch.utils.data import Dataset
 import numpy as np
 from collections import defaultdict
-from typing import List
 from src.features.feature_store import FeatureStore
 
 

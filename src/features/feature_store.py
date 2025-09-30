@@ -1,5 +1,6 @@
 import pandas as pd
 import torch
+import numpy as np
 
 
 class FeatureStore:
@@ -15,14 +16,20 @@ class FeatureStore:
                  cat_cols=None,
                  multi_cat_cols=None,
                  bucket_cols=None,
-                 bucket_bins=10):
+                 bucket_bins=10,
+                 bucket_strategies=None):
 
         self.id_col = id_col
         self.numeric_cols = numeric_cols or []
         self.cat_cols = cat_cols or []
         self.multi_cat_cols = multi_cat_cols or []
         self.bucket_cols = bucket_cols or []
-        self.bucket_bins = bucket_bins
+        if isinstance(bucket_bins, dict):
+            self.bucket_bins_map = bucket_bins
+        else:
+            self.bucket_bins_map = {col: bucket_bins for col in self.bucket_cols}
+        bucket_strategies = bucket_strategies or {}
+        self.bucket_strategies = {col: bucket_strategies.get(col, "linear") for col in self.bucket_cols}
 
         # Ensure integer IDs
         df = df.copy()
@@ -41,8 +48,34 @@ class FeatureStore:
         self.bucket_df = pd.DataFrame(index=df[id_col])
         self.bucket_vocab_sizes = {}
         for col in self.bucket_cols:
-            self.bucket_df[col] = pd.cut(df[col], bins=bucket_bins, labels=False).fillna(0).astype(int)
-            self.bucket_vocab_sizes[col] = bucket_bins
+            strategy = self.bucket_strategies.get(col, "linear")
+            bins = int(self.bucket_bins_map.get(col, 10))
+            series = df[col].astype(float)
+
+            if strategy == "log":
+                values = series.fillna(0.0)
+                positive = values[values > 0]
+                if len(positive) >= 2:
+                    min_val = positive.min()
+                    max_val = positive.max()
+                    if min_val <= 0:
+                        min_val = positive[positive > 0].min()
+                    edges = np.logspace(np.log10(min_val), np.log10(max_val + 1), num=max(bins, 2))
+                    edges = np.concatenate(([0.0], edges))
+                else:
+                    min_val = values.min()
+                    max_val = values.max() if values.max() > min_val else (min_val + bins)
+                    edges = np.linspace(min_val, max_val + 1, num=bins + 1)
+                edges = np.unique(np.sort(edges))
+                if edges.size <= 1:
+                    edges = np.linspace(0, 1, num=bins + 1)
+                bucket_series = pd.cut(values, bins=edges, labels=False, include_lowest=True)
+            else:
+                bucket_series = pd.cut(series, bins=bins, labels=False, include_lowest=True)
+
+            bucket_series = bucket_series.fillna(0).astype(int)
+            self.bucket_df[col] = bucket_series
+            self.bucket_vocab_sizes[col] = int(bucket_series.max()) + 1
 
         # ---- Categorical ----
         self.cat_df = pd.DataFrame(index=df[id_col])
@@ -265,7 +298,10 @@ class FeatureStore:
 
     @property
     def bucket_dims(self):
-        return {col: self.bucket_bins for col in self.bucket_cols}
+        return {
+            col: self.bucket_vocab_sizes.get(col, int(self.bucket_bins_map.get(col, 10)))
+            for col in self.bucket_cols
+        }
 
     @property
     def total_dim(self):
