@@ -1,18 +1,19 @@
-from dataclasses import dataclass
-from typing import Dict, List, Tuple, Optional
 import time
+from dataclasses import dataclass
+from typing import Dict, List, Optional, Tuple
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from src.dataset.rank_dataset import RankDataset
-from src.rank.dcn import DCNRanker
-from src.rank.din import DINRanker
-from src.rank.deepfm import DeepFM
-from src.rank.sasrec import SASRecRanker
-from src.rank.dcn_din import DCNDINRanker
 from src.evaluation import evaluate_ranker_with_candidates
+from src.rank.dcn import DCNRanker
+from src.rank.dcn_din import DCNDINRanker
+from src.rank.deepfm import DeepFM
+from src.rank.din import DINRanker
+from src.rank.sasrec import SASRecRanker
 
 
 @dataclass
@@ -31,6 +32,10 @@ class RankTrainingConfig:
     sasrec_layers: int = 2
     fm_dim: int = 32
     early_stop_patience: Optional[int] = 2
+    num_workers: int = 4
+    prefetch_factor: int = 2
+    persistent_workers: bool = True
+    eval_batch_size: int = 4096
 
 
 @dataclass
@@ -55,21 +60,31 @@ def train_ranker_model(
     device: torch.device,
     config: RankTrainingConfig = RankTrainingConfig(),
 ) -> RankTrainingOutputs:
-    user_emb_cpu = user_embeddings.detach().cpu()
-    item_emb_cpu = item_embeddings.detach().cpu()
-    user_feat_cpu = user_feat_matrix_cpu.detach().cpu()
-    item_feat_cpu = item_feat_matrix_cpu.detach().cpu()
+    user_emb_cpu = user_embeddings.detach().contiguous().cpu()
+    item_emb_cpu = item_embeddings.detach().contiguous().cpu()
+    user_feat_cpu = user_feat_matrix_cpu.detach().contiguous().cpu()
+    item_feat_cpu = item_feat_matrix_cpu.detach().contiguous().cpu()
 
     if device.type == "cuda":
-        user_emb_train = user_emb_cpu.to(device)
-        item_emb_train = item_emb_cpu.to(device)
-        user_feat_train = user_feat_cpu.to(device)
-        item_feat_train = item_feat_cpu.to(device)
+        user_emb_dataset = user_emb_cpu.pin_memory()
+        item_emb_dataset = item_emb_cpu.pin_memory()
+        user_feat_dataset = user_feat_cpu.pin_memory()
+        item_feat_dataset = item_feat_cpu.pin_memory()
+
+        user_emb_device = user_emb_cpu.to(device, non_blocking=True)
+        item_emb_device = item_emb_cpu.to(device, non_blocking=True)
+        user_feat_device = user_feat_cpu.to(device, non_blocking=True)
+        item_feat_device = item_feat_cpu.to(device, non_blocking=True)
     else:
-        user_emb_train = user_emb_cpu
-        item_emb_train = item_emb_cpu
-        user_feat_train = user_feat_cpu
-        item_feat_train = item_feat_cpu
+        user_emb_dataset = user_emb_cpu
+        item_emb_dataset = item_emb_cpu
+        user_feat_dataset = user_feat_cpu
+        item_feat_dataset = item_feat_cpu
+
+        user_emb_device = user_emb_cpu
+        item_emb_device = item_emb_cpu
+        user_feat_device = user_feat_cpu
+        item_feat_device = item_feat_cpu
 
     rank_dataset = RankDataset(
         ratings_df=train_df,
@@ -77,19 +92,28 @@ def train_ranker_model(
         user_store=user_store,
         item_store=item_store,
         num_negatives=config.num_negatives,
-        user_emb=user_emb_train,
-        item_emb=item_emb_train,
-        user_feat_tensor=user_feat_train,
-        item_feat_tensor=item_feat_train,
+        user_emb=user_emb_dataset,
+        item_emb=item_emb_dataset,
+        user_feat_tensor=user_feat_dataset,
+        item_feat_tensor=item_feat_dataset,
         user_candidates=user_candidates,
     )
 
-    rank_loader = DataLoader(
-        rank_dataset,
+    loader_kwargs = dict(
         batch_size=config.batch_size,
         shuffle=True,
         drop_last=True,
-        pin_memory=device.type != "cuda",
+        pin_memory=device.type == "cuda",
+        num_workers=config.num_workers,
+    )
+
+    if config.num_workers > 0:
+        loader_kwargs["persistent_workers"] = config.persistent_workers
+        loader_kwargs["prefetch_factor"] = config.prefetch_factor
+
+    rank_loader = DataLoader(
+        rank_dataset,
+        **loader_kwargs,
     )
 
     user_dim = user_embeddings.shape[1]
@@ -154,7 +178,6 @@ def train_ranker_model(
     else:
         raise ValueError(f"Unknown ranking model_type: {config.model_type}")
 
-
     optimizer = optim.Adam(ranker.parameters(), lr=config.lr)
     loss_fn = nn.BCELoss()
 
@@ -173,18 +196,18 @@ def train_ranker_model(
         epoch_start = time.time()
         for batch in rank_loader:
             optimizer.zero_grad()
-            u_emb_batch = batch["u_emb"].to(device)
-            i_emb_batch = batch["i_emb"].to(device)
-            u_feats_batch = batch["u_feats"].to(device)
-            i_feats_batch = batch["i_feats"].to(device)
+            u_emb_batch = batch["u_emb"].to(device, non_blocking=True)
+            i_emb_batch = batch["i_emb"].to(device, non_blocking=True)
+            u_feats_batch = batch["u_feats"].to(device, non_blocking=True)
+            i_feats_batch = batch["i_feats"].to(device, non_blocking=True)
 
             if use_history:
                 t_hist = time.time()
-                hist_items = batch["hist_items"].to(device)
+                hist_items = batch["hist_items"].to(device, non_blocking=True)
                 hist_mask = hist_items >= 0
                 hist_indices = hist_items.clone()
                 hist_indices[~hist_mask] = 0
-                hist_emb = item_emb_train[hist_indices.long()]
+                hist_emb = item_emb_device[hist_indices.long()]
                 hist_emb = hist_emb * hist_mask.unsqueeze(-1)
                 history_time += time.time() - t_hist
             else:
@@ -209,14 +232,16 @@ def train_ranker_model(
                     i_feats=i_feats_batch,
                 )
             forward_time += time.time() - t_fwd
-            loss = loss_fn(preds, batch["label"].to(device))
+            loss = loss_fn(preds, batch["label"].to(device, non_blocking=True))
             t_bwd = time.time()
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
             backward_time += time.time() - t_bwd
         epoch_time = time.time() - epoch_start
-        print(f"[Rank] Epoch {epoch + 1}, Loss = {total_loss / max(len(rank_loader), 1):.4f}")
+        print(
+            f"[Rank] Epoch {epoch + 1}, Loss = {total_loss / max(len(rank_loader), 1):.4f}"
+        )
         print(
             f"[Timing][Rank] Epoch {epoch + 1} took {epoch_time:.2f}s "
             f"(history {history_time:.2f}s | forward {forward_time:.2f}s | backward {backward_time:.2f}s)"
@@ -227,16 +252,17 @@ def train_ranker_model(
             eval_start = time.time()
             val_metrics = evaluate_ranker_with_candidates(
                 ranker,
-                user_emb_cpu,
-                item_emb_cpu,
+                user_emb_device,
+                item_emb_device,
                 user_candidates,
                 val_pairs,
                 rank_k=config.rank_k,
                 device=device,
-                user_feat_matrix=user_feat_cpu,
-                item_feat_matrix=item_feat_cpu,
+                user_feat_matrix=user_feat_device,
+                item_feat_matrix=item_feat_device,
                 user_histories=user_histories,
                 max_history=rank_dataset.max_history,
+                batch_size=config.eval_batch_size,
             )
             eval_time = time.time() - eval_start
 
@@ -249,7 +275,10 @@ def train_ranker_model(
         )
         print(f"[Timing][Rank] Validation took {eval_time:.2f}s")
 
-        if best_metrics is None or val_recall > best_metrics.get("recall@k", 0.0) + 1e-5:
+        if (
+            best_metrics is None
+            or val_recall > best_metrics.get("recall@k", 0.0) + 1e-5
+        ):
             best_metrics = val_metrics
             best_state = ranker.state_dict()
             patience_counter = 0
@@ -274,17 +303,20 @@ def train_ranker_model(
             eval_start = time.time()
             metrics = evaluate_ranker_with_candidates(
                 ranker,
-                user_emb_cpu,
-                item_emb_cpu,
+                user_emb_device,
+                item_emb_device,
                 user_candidates,
                 test_pairs,
                 rank_k=config.rank_k,
                 device=device,
-                user_feat_matrix=user_feat_cpu,
-                item_feat_matrix=item_feat_cpu,
+                user_feat_matrix=user_feat_device,
+                item_feat_matrix=item_feat_device,
                 user_histories=user_histories,
                 max_history=rank_dataset.max_history,
+                batch_size=config.eval_batch_size,
             )
-            print(f"[Timing][Rank] Test evaluation took {time.time() - eval_start:.2f}s")
+            print(
+                f"[Timing][Rank] Test evaluation took {time.time() - eval_start:.2f}s"
+            )
 
     return RankTrainingOutputs(ranker=ranker, metrics=metrics)
