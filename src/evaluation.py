@@ -84,49 +84,54 @@ def evaluate_ranker_with_candidates(
     max_history: int = 50,
 ):
     """Evaluate ranker using precomputed recall candidates."""
-
-    user_emb = user_emb.to(device)
-    item_emb = item_emb.to(device)
-    if user_feat_matrix is not None:
+    if user_emb.device != device:
+        user_emb = user_emb.to(device)
+    if item_emb.device != device:
+        item_emb = item_emb.to(device)
+    if user_feat_matrix is not None and user_feat_matrix.device != device:
         user_feat_matrix = user_feat_matrix.to(device)
-    if item_feat_matrix is not None:
+    if item_feat_matrix is not None and item_feat_matrix.device != device:
         item_feat_matrix = item_feat_matrix.to(device)
 
     results = {"recall@k": [], "ndcg@k": [], "gauc@k": []}
+
+    requires_history = getattr(ranker, "requires_history", False)
 
     for u, true_item in test_pairs:
         candidate_items = user_candidates.get(u, [])
         if not candidate_items:
             results["recall@k"].append(0.0)
             results["ndcg@k"].append(0.0)
+            results["gauc@k"].append(0.0)
             continue
 
-        cand_vecs = item_emb[candidate_items]
+        candidate_tensor = torch.as_tensor(candidate_items, dtype=torch.long, device=device)
+        cand_vecs = item_emb[candidate_tensor]
         u_vec = user_emb[u].unsqueeze(0)
         u_expand = u_vec.repeat(cand_vecs.size(0), 1)
 
         u_side = i_side = None
         if (user_feat_matrix is not None) and (item_feat_matrix is not None):
             u_side = user_feat_matrix[u].unsqueeze(0).repeat(cand_vecs.size(0), 1)
-            i_side = item_feat_matrix[candidate_items]
+            i_side = item_feat_matrix[candidate_tensor]
 
         hist_emb = hist_mask = None
-        if getattr(ranker, "requires_history", False) and user_histories is not None:
+        if requires_history and user_histories is not None:
             history_items = user_histories.get(u, [])
             history_trim = history_items[-max_history:]
             hist_tensor = torch.full((max_history,), -1, dtype=torch.long, device=device)
             if history_trim:
-                hist_tensor[-len(history_trim):] = torch.tensor(history_trim, dtype=torch.long, device=device)
-            hist_mask = hist_tensor >= 0
+                hist_tensor[-len(history_trim):] = torch.as_tensor(history_trim, dtype=torch.long, device=device)
+            hist_mask_single = hist_tensor >= 0
             hist_indices = hist_tensor.clone()
-            hist_indices[~hist_mask] = 0
+            hist_indices[~hist_mask_single] = 0
             hist_emb_base = item_emb[hist_indices.long()]
-            hist_emb_base = hist_emb_base * hist_mask.unsqueeze(-1)
+            hist_emb_base = hist_emb_base * hist_mask_single.unsqueeze(-1)
             hist_emb = hist_emb_base.unsqueeze(0).expand(cand_vecs.size(0), -1, -1)
-            hist_mask = hist_mask.unsqueeze(0).expand(cand_vecs.size(0), -1)
+            hist_mask = hist_mask_single.unsqueeze(0).expand(cand_vecs.size(0), -1)
 
         with torch.no_grad():
-            if getattr(ranker, "requires_history", False):
+            if requires_history:
                 scores_tensor = ranker(
                     u_expand,
                     cand_vecs,
@@ -142,22 +147,35 @@ def evaluate_ranker_with_candidates(
                     u_feats=u_side,
                     i_feats=i_side,
                 )
-            scores = scores_tensor.view(-1).detach().cpu().numpy()
+            scores_tensor = scores_tensor.view(-1)
 
-        ranked_idx = np.argsort(-scores)[:rank_k]
-        ranked_items = [candidate_items[i] for i in ranked_idx]
+        top_k = min(rank_k, scores_tensor.size(0))
+        top_indices = torch.topk(scores_tensor, top_k).indices
+        ranked_items_tensor = candidate_tensor[top_indices]
+        ranked_items = ranked_items_tensor.tolist()
 
-        results["recall@k"].append(recall_at_k(ranked_items, true_item, rank_k))
-        results["ndcg@k"].append(ndcg_at_k(ranked_items, true_item, rank_k))
+        hit = 1.0 if true_item in ranked_items else 0.0
+        results["recall@k"].append(hit)
+        if hit:
+            rank_position = ranked_items.index(true_item)
+            ndcg = 1.0 / np.log2(rank_position + 2)
+        else:
+            ndcg = 0.0
+        results["ndcg@k"].append(ndcg)
 
-        if true_item in candidate_items and len(candidate_items) > 1:
-            pos_idx = candidate_items.index(true_item)
-            pos_score = scores[pos_idx]
-            neg_scores = np.delete(scores, pos_idx)
-            if neg_scores.size > 0:
-                better = np.sum(pos_score > neg_scores)
-                ties = np.sum(np.isclose(pos_score, neg_scores))
-                auc = (better + 0.5 * ties) / neg_scores.size
-                results["gauc@k"].append(float(auc))
+        pos_mask = candidate_tensor == true_item
+        if pos_mask.any() and candidate_tensor.numel() > 1:
+            pos_idx = torch.nonzero(pos_mask, as_tuple=False)[0].item()
+            pos_score = scores_tensor[pos_idx]
+            neg_scores = scores_tensor[~pos_mask]
+            if neg_scores.numel() > 0:
+                better = torch.sum((pos_score > neg_scores).float()).item()
+                ties = torch.sum(torch.isclose(pos_score.expand_as(neg_scores), neg_scores).float()).item()
+                auc = (better + 0.5 * ties) / neg_scores.numel()
+                results["gauc@k"].append(auc)
+            else:
+                results["gauc@k"].append(0.0)
+        else:
+            results["gauc@k"].append(0.0)
 
     return {k: float(np.mean(v)) for k, v in results.items()}
