@@ -8,6 +8,8 @@ from torch.utils.data import DataLoader
 
 from src.dataset.rank_dataset import RankDataset
 from src.rank.dcn import DCNRanker
+from src.rank.din import DINRanker
+from src.rank.deepfm import DeepFM
 from src.evaluation import evaluate_ranker_with_candidates
 
 
@@ -18,9 +20,12 @@ class RankTrainingConfig:
     lr: float = 1e-3
     num_negatives: int = 5
     rank_k: int = 10
+    model_type: str = "dcn"  # choices: dcn, din, deepfm
     cross_layers: int = 3
     hidden_dims: tuple = (256, 128)
     dropout: float = 0.2
+    attention_hidden: tuple = (64, 32)
+    fm_dim: int = 32
     early_stop_patience: Optional[int] = 2
 
 
@@ -42,6 +47,7 @@ def train_ranker_model(
     item_feat_matrix_cpu: torch.Tensor,
     user_candidates,
     test_pairs: List[Tuple[int, int]],
+    user_histories: Dict[int, List[int]] | None,
     device: torch.device,
     config: RankTrainingConfig = RankTrainingConfig(),
 ) -> RankTrainingOutputs:
@@ -87,15 +93,40 @@ def train_ranker_model(
     user_feat_dim = user_feat_cpu.shape[1] if user_feat_cpu.numel() else 0
     item_feat_dim = item_feat_cpu.shape[1] if item_feat_cpu.numel() else 0
 
-    ranker = DCNRanker(
-        user_dim=user_dim,
-        item_dim=item_dim,
-        user_feat_dim=user_feat_dim,
-        item_feat_dim=item_feat_dim,
-        cross_layers=config.cross_layers,
-        hidden_dims=config.hidden_dims,
-        dropout=config.dropout,
-    ).to(device)
+    model_type = config.model_type.lower()
+    if model_type == "din":
+        ranker = DINRanker(
+            user_dim=user_dim,
+            item_dim=item_dim,
+            user_feat_dim=user_feat_dim,
+            item_feat_dim=item_feat_dim,
+            attention_hidden=config.attention_hidden,
+            dnn_hidden=config.hidden_dims,
+            dropout=config.dropout,
+        ).to(device)
+    elif model_type == "deepfm":
+        ranker = DeepFM(
+            user_dim=user_dim,
+            item_dim=item_dim,
+            user_feat_dim=user_feat_dim,
+            item_feat_dim=item_feat_dim,
+            fm_dim=config.fm_dim,
+            hidden_dims=config.hidden_dims,
+            dropout=config.dropout,
+        ).to(device)
+    elif model_type == "dcn":
+        ranker = DCNRanker(
+            user_dim=user_dim,
+            item_dim=item_dim,
+            user_feat_dim=user_feat_dim,
+            item_feat_dim=item_feat_dim,
+            cross_layers=config.cross_layers,
+            hidden_dims=config.hidden_dims,
+            dropout=config.dropout,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown ranking model_type: {config.model_type}")
+
 
     optimizer = optim.Adam(ranker.parameters(), lr=config.lr)
     loss_fn = nn.BCELoss()
@@ -104,16 +135,36 @@ def train_ranker_model(
     best_state = None
     patience_counter = 0
 
+    use_history = getattr(ranker, "requires_history", False)
+
     for epoch in range(config.epochs):
         ranker.train()
         total_loss = 0.0
         for batch in rank_loader:
             optimizer.zero_grad()
+            u_emb_batch = batch["u_emb"].to(device)
+            i_emb_batch = batch["i_emb"].to(device)
+            u_feats_batch = batch["u_feats"].to(device)
+            i_feats_batch = batch["i_feats"].to(device)
+
+            if use_history:
+                hist_items = batch["hist_items"].to(device)
+                hist_mask = hist_items >= 0
+                hist_indices = hist_items.clone()
+                hist_indices[~hist_mask] = 0
+                hist_emb = item_emb_train[hist_indices.long()]
+                hist_emb = hist_emb * hist_mask.unsqueeze(-1)
+            else:
+                hist_emb = None
+                hist_mask = None
+
             preds = ranker(
-                batch["u_emb"].to(device),
-                batch["i_emb"].to(device),
-                u_feats=batch["u_feats"].to(device),
-                i_feats=batch["i_feats"].to(device),
+                u_emb_batch,
+                i_emb_batch,
+                u_feats=u_feats_batch,
+                i_feats=i_feats_batch,
+                hist_emb=hist_emb,
+                hist_mask=hist_mask,
             )
             loss = loss_fn(preds, batch["label"].to(device))
             loss.backward()
@@ -133,6 +184,8 @@ def train_ranker_model(
                 device=device,
                 user_feat_matrix=user_feat_cpu,
                 item_feat_matrix=item_feat_cpu,
+                user_histories=user_histories,
+                max_history=rank_dataset.max_history,
             )
 
         val_recall = val_metrics.get("recall@k", 0.0)
@@ -170,6 +223,8 @@ def train_ranker_model(
                 device=device,
                 user_feat_matrix=user_feat_cpu,
                 item_feat_matrix=item_feat_cpu,
+                user_histories=user_histories,
+                max_history=rank_dataset.max_history,
             )
 
     return RankTrainingOutputs(ranker=ranker, metrics=metrics)

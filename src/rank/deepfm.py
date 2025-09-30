@@ -20,6 +20,7 @@ class DeepFM(nn.Module):
         self.item_dim = item_dim
         self.user_feat_dim = user_feat_dim
         self.item_feat_dim = item_feat_dim
+        self.requires_history = False
         input_dim = user_dim + item_dim + user_feat_dim + item_feat_dim
 
         self.linear = nn.Linear(input_dim, 1)

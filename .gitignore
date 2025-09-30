@@ -1,8 +1,11 @@
-# Python caches
+# Ignore Python cache and compiled files
 __pycache__/
-*.py[cod]
+*.pyc
 *.pyo
-
+*.pyd
+*.pyd
+*.so
+*.cpython-*
 # Virtual environments
 .env/
 .venv/
@@ -17,3 +20,4 @@ __pycache__/
 # Logs
 logs/
 *.log
+

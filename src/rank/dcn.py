@@ -43,6 +43,7 @@ class DCNRanker(nn.Module):
         super().__init__()
         input_dim = user_dim + item_dim + user_feat_dim + item_feat_dim
         self.input_dim = input_dim
+        self.requires_history = False
 
         self.cross_net = CrossNetwork(input_dim, cross_layers)
 
@@ -67,7 +68,7 @@ class DCNRanker(nn.Module):
             parts.append(i_feats)
         return torch.cat(parts, dim=-1)
 
-    def forward(self, u_emb, i_emb, u_feats=None, i_feats=None):
+    def forward(self, u_emb, i_emb, u_feats=None, i_feats=None, hist_emb=None, hist_mask=None):
         x = self._concat_features(u_emb, i_emb, u_feats, i_feats)
         cross_out = self.cross_net(x)
         deep_out = self.deep_net(x)

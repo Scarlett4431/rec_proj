@@ -139,6 +139,7 @@ def main():
         item_feat_matrix_cpu,
         user_candidates,
         data.test_pairs,
+        data.user_histories,
         device,
         config=RankTrainingConfig(),
     )

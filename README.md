@@ -46,3 +46,8 @@ Result:
 Hybrid Recall Eval (after warm-up): {'recall@k': 0.40760380190095047, 'ndcg@k': 0.10393681505170957}
 Using DeepFM: Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.05467733866933467, 'ndcg@k': 0.0254182768799728}
 Using DCN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.06407203601800901, 'ndcg@k': 0.03007650543344327}
+
+
+Version 1.6:
+Rank: Add DIN as baseline. RankDataset now logs user;s most recent interations.
+Using DIN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.07139681692895883, 'ndcg@k': 0.03401337771569224}

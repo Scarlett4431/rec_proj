@@ -79,6 +79,8 @@ def evaluate_ranker_with_candidates(
     device="cpu",
     user_feat_matrix=None,
     item_feat_matrix=None,
+    user_histories: Dict[int, List[int]] | None = None,
+    max_history: int = 50,
 ):
     """Evaluate ranker using precomputed recall candidates."""
 
@@ -107,8 +109,30 @@ def evaluate_ranker_with_candidates(
             u_side = user_feat_matrix[u].unsqueeze(0).repeat(cand_vecs.size(0), 1)
             i_side = item_feat_matrix[candidate_items]
 
+        hist_emb = hist_mask = None
+        if getattr(ranker, "requires_history", False) and user_histories is not None:
+            history_items = user_histories.get(u, [])
+            history_trim = history_items[-max_history:]
+            hist_tensor = torch.full((max_history,), -1, dtype=torch.long, device=device)
+            if history_trim:
+                hist_tensor[-len(history_trim):] = torch.tensor(history_trim, dtype=torch.long, device=device)
+            hist_mask = hist_tensor >= 0
+            hist_indices = hist_tensor.clone()
+            hist_indices[~hist_mask] = 0
+            hist_emb_base = item_emb[hist_indices.long()]
+            hist_emb_base = hist_emb_base * hist_mask.unsqueeze(-1)
+            hist_emb = hist_emb_base.unsqueeze(0).expand(cand_vecs.size(0), -1, -1)
+            hist_mask = hist_mask.unsqueeze(0).expand(cand_vecs.size(0), -1)
+
         with torch.no_grad():
-            scores = ranker(u_expand, cand_vecs, u_feats=u_side, i_feats=i_side)
+            scores = ranker(
+                u_expand,
+                cand_vecs,
+                u_feats=u_side,
+                i_feats=i_side,
+                hist_emb=hist_emb,
+                hist_mask=hist_mask,
+            )
             scores = scores.view(-1).detach().cpu().numpy()
 
         ranked_idx = np.argsort(-scores)[:rank_k]

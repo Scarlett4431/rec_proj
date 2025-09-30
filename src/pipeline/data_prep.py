@@ -19,6 +19,7 @@ class PreparedData:
     test_pairs: List[Tuple[int, int]]
     val_users: List[int]
     user_consumed: Dict[int, set]
+    user_histories: Dict[int, List[int]]
     num_users: int
     num_items: int
     user2id: Dict[int, int]
@@ -52,6 +53,13 @@ def load_and_prepare_data(data_dir: str = "data/ml-1m") -> PreparedData:
         if user in user_consumed:
             user_consumed[user].difference_update(items)
 
+    user_histories = (
+        train.sort_values(["user_idx", "timestamp"])
+        .groupby("user_idx")["item_idx"]
+        .apply(list)
+        .to_dict()
+    )
+
     return PreparedData(
         ratings=ratings,
         movies=movies,
@@ -63,6 +71,7 @@ def load_and_prepare_data(data_dir: str = "data/ml-1m") -> PreparedData:
         test_pairs=test_pairs,
         val_users=val_users,
         user_consumed=user_consumed,
+        user_histories=user_histories,
         num_users=num_users,
         num_items=num_items,
         user2id=user2id,
