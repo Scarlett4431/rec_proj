@@ -50,7 +50,8 @@ def main():
     step_time = time.time()
     cache_data = load_recall_cache(cache_dir)
     print(f"[Timing] Cache lookup took {time.time() - step_time:.2f}s")
-    if cache_data is not None:
+    # if cache_data is not None:
+    if False:
         print("Loaded recall artifacts from cache.")
         (
             user_embeddings,

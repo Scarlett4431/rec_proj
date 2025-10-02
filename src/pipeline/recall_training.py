@@ -19,7 +19,9 @@ from src.recall.two_tower import TwoTowerModel
 class RecallTrainingConfig:
     batch_size: int = 1024
     warmup_epochs: int = 15
-    easy_neg_samples: int = 3
+    easy_neg_samples: int = 5
+    hard_neg_samples: int = 1        
+    hard_neg_k: int = 50             
     embed_dim: int = 64
     tower_dropout: float = 0.1
     emb_lr: float = 5e-3
@@ -54,6 +56,8 @@ def train_two_tower_model(
         feature_components.user_store,
         feature_components.item_store,
         easy_neg_samples=config.easy_neg_samples,
+        hard_neg_k=config.hard_neg_k,              
+        hard_neg_samples=config.hard_neg_samples,  
         num_items=num_items,
     )
     recall_loader = DataLoader(
@@ -204,8 +208,11 @@ def train_two_tower_model(
                     pos_out = torch.cat([pos_out, neg_emb], dim=0)
                 _ = time.perf_counter() - timer_start
 
+
             t0 = time.time()
             loss = loss_fn(user_out, pos_out)
+            # total_negs_per_user = pos_out.shape[0] - 1
+            # print(f"[Debug] Total negatives per positive = {total_negs_per_user}")
             loss.backward()
             optimizer.step()
             total_loss += loss.item()

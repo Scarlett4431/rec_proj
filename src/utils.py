@@ -21,32 +21,28 @@ def remap_ids(ratings, movies):
     return ratings, movies, user2id, item2id
 
 
-def user_stratified_split(ratings, test_frac=0.1, random_state=42, min_test_items=1):
-    """Split ratings so every user keeps interactions in train and (optionally) test.
-
-    Ensures no user appears exclusively in the test set, avoiding cold-start users
-    during evaluation. Users with too few interactions remain entirely in train.
+def user_stratified_split(ratings, test_frac=0.1, random_state=42,
+                          min_test_items=1, min_interactions=5):
+    """
+    Split ratings so every user keeps interactions in train and (optionally) test.
+    Sparse users (< min_interactions) are kept entirely in train.
     """
     if not 0.0 < test_frac < 1.0:
         raise ValueError("test_frac must be between 0 and 1")
 
-    train_parts = []
-    test_parts = []
+    train_parts, test_parts = [], []
 
     for user_id, group in ratings.groupby("user_idx", sort=False):
         group_size = len(group)
-        # Need at least (min_test_items + 1) interactions to contribute to test set
-        min_required = max(min_test_items + 1, 2)
-        if group_size < min_required:
+
+        # sparse users → all train
+        if group_size < min_interactions:
             train_parts.append(group)
             continue
 
         test_size = max(min_test_items, int(round(group_size * test_frac)))
         if test_size >= group_size:
             test_size = group_size - 1
-        if test_size <= 0:
-            train_parts.append(group)
-            continue
 
         sampled = group.sample(n=test_size, random_state=random_state + user_id)
         remaining = group.drop(sampled.index)
@@ -55,8 +51,8 @@ def user_stratified_split(ratings, test_frac=0.1, random_state=42, min_test_item
         test_parts.append(sampled)
 
     train_df = pd.concat(train_parts).sort_index().reset_index(drop=True)
-    test_df = pd.concat(test_parts).sort_index().reset_index(drop=True) if test_parts else pd.DataFrame(columns=ratings.columns)
-
+    test_df = (pd.concat(test_parts).sort_index().reset_index(drop=True)
+               if test_parts else pd.DataFrame(columns=ratings.columns))
     return train_df, test_df
 
 
