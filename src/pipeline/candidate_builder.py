@@ -70,10 +70,10 @@ def build_hybrid_candidates(
     user_consumed,
     sources: CandidateSources,
     candidate_k: int = 100,
-    faiss_weight: float = 0.7,
+    faiss_weight: float = 0.8,
     covis_weight: float = 0,
-    itemcf_weight: float = 0.5,
-    popular_weight: float = 0.3,
+    itemcf_weight: float = 0.4,
+    popular_weight: float = 0.1,
 ) -> Dict[int, list]:
     faiss_index = FaissIndex(item_emb.detach().cpu())
     num_users = user_emb.size(0)

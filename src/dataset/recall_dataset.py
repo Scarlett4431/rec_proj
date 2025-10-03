@@ -21,6 +21,9 @@ class RecallDataset(Dataset):
         hard_neg_k=0,
         hard_neg_samples=0,
         easy_neg_samples=0,
+        tail_neg_samples=0,
+        tail_sampling_alpha: float = 0.75,
+        tail_sampling_smoothing: float = 1.0,
         num_items=None,
     ):
         """
@@ -30,6 +33,9 @@ class RecallDataset(Dataset):
         hard_neg_k: if >0, use FAISS to mine top-k neighbors as hard negative pool
         hard_neg_samples: how many to sample per positive
         easy_neg_samples: number of random easy negatives per positive
+        tail_neg_samples: number of popularity-balanced negatives per positive
+        tail_sampling_alpha: exponent for inverse-popularity sampling (higher -> more tail)
+        tail_sampling_smoothing: additive smoothing before inverse weighting
         num_items: total catalog size (required when easy_neg_samples > 0; inferred if None)
         """
         self.pairs = ratings_df[["user_idx", "item_idx"]].values
@@ -52,8 +58,11 @@ class RecallDataset(Dataset):
         }
 
         self.pad_item_id = -1
-        self.hard_neg_samples = hard_neg_samples
-        self.easy_neg_samples = easy_neg_samples
+        self.hard_neg_samples = int(max(hard_neg_samples, 0))
+        self.easy_neg_samples = int(max(easy_neg_samples, 0))
+        self.tail_neg_samples = int(max(tail_neg_samples, 0))
+        self.tail_sampling_alpha = float(max(tail_sampling_alpha, 0.0))
+        self.tail_sampling_smoothing = float(max(tail_sampling_smoothing, 0.0))
         self.hard_negatives = {}
         if num_items is not None:
             self.num_items = int(num_items)
@@ -64,6 +73,23 @@ class RecallDataset(Dataset):
         self._rng = np.random.default_rng()
         self.user_available_cache: Dict[int, np.ndarray] = {}
         self._catalog = np.arange(self.num_items, dtype=np.int64) if self.num_items > 0 else np.empty(0, dtype=np.int64)
+        self._tail_sampling_probs = None
+        if self.tail_neg_samples > 0 and self.num_items > 0:
+            counts = np.full(self.num_items, self.tail_sampling_smoothing, dtype=np.float64)
+            if len(self.pairs) > 0:
+                item_counts = np.bincount(self.pairs[:, 1], minlength=self.num_items).astype(np.float64)
+                counts[: item_counts.shape[0]] += item_counts
+            if self.tail_sampling_alpha > 0.0:
+                weights = np.power(counts, -self.tail_sampling_alpha, where=counts > 0, out=np.zeros_like(counts))
+                weights[counts <= 0] = 0.0
+            else:
+                weights = np.ones_like(counts)
+            total = weights.sum()
+            if total > 0:
+                self._tail_sampling_probs = weights / total
+            elif self.num_items > 0:
+                self._tail_sampling_probs = np.full(self.num_items, 1.0 / self.num_items, dtype=np.float64)
+
 
         # Precompute item neighbors globally if requested
         if hard_neg_k > 0 and item_emb is not None:
@@ -91,11 +117,14 @@ class RecallDataset(Dataset):
             "pos_item": torch.tensor(pos_item, dtype=torch.long),
         }
 
+        consumed = self.user_rated.get(u, frozenset())
+        consumed_set = set(consumed)
+        consumed_np = self.user_consumed_np.get(u, np.empty(0, dtype=np.int64))
+
         # Hard negatives
         if self.hard_neg_samples > 0 and pos_item in self.hard_negatives:
             candidates = self.hard_negatives[pos_item]
-            consumed = self.user_rated.get(u, frozenset())
-            filtered = np.array([c for c in candidates if c not in consumed], dtype=np.int64)
+            filtered = np.array([c for c in candidates if c not in consumed_set and c != pos_item], dtype=np.int64)
 
             if filtered.size == 0:
                 neg_items = torch.full((self.hard_neg_samples,), self.pad_item_id, dtype=torch.long)
@@ -108,8 +137,6 @@ class RecallDataset(Dataset):
             sample["hard_neg_items"] = torch.full((self.hard_neg_samples,), self.pad_item_id, dtype=torch.long)
 
         if self.easy_neg_samples > 0 and self.num_items > 0:
-            consumed = self.user_rated.get(u, frozenset())
-            consumed_np = self.user_consumed_np.get(u, np.empty(0, dtype=np.int64))
             easy_negs: List[int] = []
             attempts = 0
             draw_size = max(self.easy_neg_samples * 4, self.easy_neg_samples + 8)
@@ -126,12 +153,12 @@ class RecallDataset(Dataset):
                     easy_negs.extend(filtered[:take].tolist())
                 attempts += 1
 
-            if len(easy_negs) < self.easy_neg_samples and len(consumed) < self.num_items - 1:
+            if len(easy_negs) < self.easy_neg_samples and len(consumed_set) < self.num_items - 1:
                 remaining = self.easy_neg_samples - len(easy_negs)
                 available = self.user_available_cache.get(u)
                 if available is None:
                     available = np.setdiff1d(self._catalog, consumed_np, assume_unique=True)
-                    if available.size > 0 and pos_item not in consumed:
+                    if available.size > 0 and pos_item not in consumed_set:
                         available = available[available != pos_item]
                     self.user_available_cache[u] = available
                 if available.size > 0:
@@ -145,6 +172,35 @@ class RecallDataset(Dataset):
             sample["easy_neg_items"] = torch.tensor(easy_negs[:self.easy_neg_samples], dtype=torch.long)
         else:
             sample["easy_neg_items"] = torch.full((self.easy_neg_samples,), self.pad_item_id, dtype=torch.long)
+
+        if self.tail_neg_samples > 0 and self._tail_sampling_probs is not None:
+            tail_negs: List[int] = []
+            attempts = 0
+            desired = self.tail_neg_samples
+            while len(tail_negs) < desired and attempts < 5:
+                draws = self._rng.choice(
+                    self.num_items,
+                    size=max(desired * 4, desired + 8),
+                    replace=True,
+                    p=self._tail_sampling_probs,
+                )
+                for cand in draws:
+                    cand_int = int(cand)
+                    if cand_int == pos_item or cand_int in consumed_set:
+                        continue
+                    if cand_int in tail_negs:
+                        continue
+                    tail_negs.append(cand_int)
+                    if len(tail_negs) >= desired:
+                        break
+                attempts += 1
+
+            if len(tail_negs) < desired:
+                tail_negs.extend([self.pad_item_id] * (desired - len(tail_negs)))
+
+            sample["tail_neg_items"] = torch.tensor(tail_negs[:desired], dtype=torch.long)
+        else:
+            sample["tail_neg_items"] = torch.full((self.tail_neg_samples,), self.pad_item_id, dtype=torch.long)
 
         return sample
 

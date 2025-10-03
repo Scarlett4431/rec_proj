@@ -69,3 +69,22 @@ def build_user_item_map(df: pd.DataFrame, user_col: str = "user_idx", item_col: 
         interactions[int(u)].add(int(i))
 
     return interactions
+
+
+def build_item_name_lookup(
+    movies: pd.DataFrame,
+    id_col: str = "item_idx",
+    name_col: str = "title",
+) -> dict[int, str]:
+    """Return mapping from internal item index to a readable name."""
+
+    if movies is None or movies.empty:
+        return {}
+    if id_col not in movies.columns:
+        raise ValueError(f"Missing column '{id_col}' in movies frame")
+    if name_col not in movies.columns:
+        raise ValueError(f"Missing column '{name_col}' in movies frame")
+
+    id_series = movies[id_col].astype(int)
+    name_series = movies[name_col].astype(str).fillna("")
+    return {int(idx): name for idx, name in zip(id_series, name_series)}

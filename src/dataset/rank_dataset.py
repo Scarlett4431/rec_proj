@@ -1,12 +1,15 @@
+from collections import defaultdict
+from typing import Sequence, Tuple
+
+import numpy as np
 import torch
 from torch.utils.data import Dataset
-import numpy as np
-from collections import defaultdict
+
 from src.features.feature_store import FeatureStore
 
 
 class RankDataset(Dataset):
-    """Ranking dataset built from recall candidates (two-stage pipeline)."""
+    """Ranking dataset with random negatives and configurable positives."""
 
     def __init__(
         self,
@@ -14,27 +17,27 @@ class RankDataset(Dataset):
         num_items,
         user_store: FeatureStore,
         item_store: FeatureStore,
-        num_negatives=5,
+        num_negatives: int = 5,
         user_emb=None,
         item_emb=None,
         user_feat_tensor=None,
         item_feat_tensor=None,
-        user_candidates=None,
         max_history: int = 50,
+        positive_pairs: Sequence[Tuple[int, int]] | None = None,
+        append_positive_to_history: bool | None = None,
     ):
+        if user_emb is None or item_emb is None:
+            raise ValueError("RankDataset requires precomputed user and item embeddings")
 
-        self.num_items = num_items
-        self.num_negatives = num_negatives
-        self.max_history = max_history
-        self.user_emb = user_emb.float() if user_emb is not None else None
-        self.item_emb = item_emb.float() if item_emb is not None else None
-        self.max_history = max_history
+        self.num_items = int(num_items)
+        self.num_negatives = max(int(num_negatives), 0)
+        self.max_history = int(max_history)
+        self.user_emb = user_emb.float()
+        self.item_emb = item_emb.float()
 
-        # Feature stores (shared with recall dataset)
         self.user_store = user_store
         self.item_store = item_store
 
-        # Precompute dense feature matrices for fast indexing
         if user_feat_tensor is not None:
             self.user_feat_tensor = user_feat_tensor.float()
         else:
@@ -47,71 +50,133 @@ class RankDataset(Dataset):
             max_item_id = max(item_store.data.keys()) if item_store.data else -1
             self.item_feat_tensor = item_store.to_matrix(max_item_id).float()
 
-        # Track interactions
-        ratings_sorted = ratings_df.sort_values(["user_idx", "timestamp"])
-        self.user_item_pairs = ratings_sorted[["user_idx", "item_idx"]].values
-        self.user_rated = defaultdict(set)
-        for u, i in self.user_item_pairs:
-            self.user_rated[u].add(i)
+        # Build history/consumption maps from ratings_df (training interactions)
+        self.user_histories: dict[int, list[int]] = {}
+        self.user_rated: defaultdict[int, set[int]] = defaultdict(set)
+        ratings_sorted = None
+        if ratings_df is not None and not ratings_df.empty:
+            ratings_sorted = ratings_df.sort_values(["user_idx", "timestamp"])
+            for user, group in ratings_sorted.groupby("user_idx", sort=False):
+                user_int = int(user)
+                history_items = group["item_idx"].astype(int).tolist()
+                self.user_histories[user_int] = history_items
+                self.user_rated[user_int].update(history_items)
 
-        # Recall candidate pool per user (FAISS shortlist)
-        self.user_candidates = user_candidates or {}
+        if append_positive_to_history is None:
+            self.append_positive_to_history = positive_pairs is None
+        else:
+            self.append_positive_to_history = bool(append_positive_to_history)
 
-        # Positive + negative samples
-        samples = []
-        histories = []
-        history_lengths = []
+        samples: list[tuple[int, int, int]] = []
+        histories: list[list[int]] = []
+        history_lengths: list[int] = []
         rng = np.random.default_rng()
-        all_items = np.arange(num_items)
-        for user, group in ratings_sorted.groupby("user_idx", sort=False):
-            history = []
-            rated = self.user_rated[user]
-            candidate_pool = self.user_candidates.get(user)
-            negatives_source = (np.array(candidate_pool, dtype=np.int64) if candidate_pool else None)
+        all_items = (
+            np.arange(self.num_items, dtype=np.int64)
+            if self.num_items > 0
+            else np.empty(0, dtype=np.int64)
+        )
 
-            for row in group.itertuples():
-                item = int(row.item_idx)
-                hist_trim = history[-self.max_history :]
-                samples.append((user, item, 1))
-                histories.append(hist_trim.copy())
-                history_lengths.append(len(hist_trim))
+        def sample_negatives(user_id: int, positive_item: int, history_snapshot: list[int]):
+            if self.num_negatives <= 0 or self.num_items <= 0:
+                return
+            exclusion = set(self.user_rated.get(user_id, set()))
+            exclusion.add(int(positive_item))
 
-                if num_negatives > 0:
-                    needed = num_negatives
-                    attempts = 0
-                    while needed > 0:
-                        if negatives_source is not None:
-                            draws = rng.choice(negatives_source, size=max(needed, 1), replace=True)
-                        else:
-                            draws = rng.choice(all_items, size=max(needed, 1), replace=True)
+            unique_budget = self.num_items - len(exclusion)
+            if unique_budget <= 0:
+                return
 
-                        candidates = [cand for cand in draws if cand not in rated]
-                        if not candidates:
-                            attempts += 1
-                            if attempts > 10:
-                                break
-                            continue
+            needed = self.num_negatives
+            attempts = 0
+            while needed > 0 and attempts < 10:
+                draw_size = max(needed * 2, needed + 8)
+                draws = rng.choice(all_items, size=draw_size, replace=True)
+                negatives: list[int] = []
+                for cand in draws:
+                    cand_int = int(cand)
+                    if cand_int in exclusion:
+                        continue
+                    exclusion.add(cand_int)
+                    negatives.append(cand_int)
+                    if len(negatives) >= needed:
+                        break
 
-                        take = candidates[:needed]
-                        for neg in take:
-                            samples.append((user, int(neg), 0))
-                            histories.append(hist_trim.copy())
-                            history_lengths.append(len(hist_trim))
-                        needed -= len(take)
+                if not negatives:
+                    attempts += 1
+                    continue
 
-                history.append(item)
+                take = negatives[:needed]
+                for neg in take:
+                    samples.append((user_id, neg, 0))
+                    histories.append(history_snapshot.copy())
+                    history_lengths.append(len(history_snapshot))
+                needed -= len(take)
 
-        samples_np = np.array(samples, dtype=np.int64)
+        if positive_pairs is None:
+            if ratings_sorted is None:
+                ratings_iter = []
+            else:
+                ratings_iter = ratings_sorted.groupby("user_idx", sort=False)
+
+            for user, group in ratings_iter:
+                user_int = int(user)
+                history: list[int] = []
+                for row in group.itertuples():
+                    item = int(row.item_idx)
+                    hist_trim = history[-self.max_history :]
+                    history_snapshot = hist_trim.copy()
+
+                    samples.append((user_int, item, 1))
+                    histories.append(history_snapshot)
+                    history_lengths.append(len(history_snapshot))
+
+                    sample_negatives(user_int, item, history_snapshot)
+
+                    history.append(item)
+        else:
+            pairs = [(int(u), int(i)) for u, i in positive_pairs]
+            history_buffer = {
+                user: list(self.user_histories.get(user, [])) for user, _ in pairs
+            }
+            for user_int, item_int in pairs:
+                base_history = history_buffer.get(user_int)
+                if base_history is None:
+                    base_history = []
+                    history_buffer[user_int] = base_history
+
+                hist_trim = base_history[-self.max_history :]
+                history_snapshot = hist_trim.copy()
+
+                samples.append((user_int, item_int, 1))
+                histories.append(history_snapshot)
+                history_lengths.append(len(history_snapshot))
+
+                sample_negatives(user_int, item_int, history_snapshot)
+
+                if self.append_positive_to_history:
+                    base_history.append(item_int)
+                    self.user_rated[user_int].add(item_int)
+
+        if samples:
+            samples_np = np.array(samples, dtype=np.int64)
+        else:
+            samples_np = np.zeros((0, 3), dtype=np.int64)
         self.samples = torch.from_numpy(samples_np)
-        self.labels = self.samples[:, 2].float()
+        self.labels = (
+            self.samples[:, 2].float()
+            if self.samples.numel()
+            else torch.zeros((0,), dtype=torch.float32)
+        )
 
         history_pad = torch.full((len(histories), self.max_history), -1, dtype=torch.long)
         for idx, hist in enumerate(histories):
             if not hist:
                 continue
             trimmed = hist[-self.max_history :]
-            hist_tensor = torch.tensor(trimmed, dtype=torch.long)
-            history_pad[idx, -len(trimmed) :] = hist_tensor
+            if trimmed:
+                hist_tensor = torch.tensor(trimmed, dtype=torch.long)
+                history_pad[idx, -len(trimmed) :] = hist_tensor
         self.history_items = history_pad
         self.history_lengths = torch.tensor(history_lengths, dtype=torch.long)
 
@@ -123,11 +188,8 @@ class RankDataset(Dataset):
         u = sample[0].item()
         i = sample[1].item()
 
-        # Recall embeddings (frozen from two-tower)
         u_emb = self.user_emb[u]
         i_emb = self.item_emb[i]
-
-        # Feature tensors (not concatenated)
         u_feats = self.user_feat_tensor[u]
         i_feats = self.item_feat_tensor[i]
 

@@ -56,16 +56,22 @@ Rank: Add DIN as baseline. RankDataset now logs users most recent interations.
     Using DIN+DCN: 
     Using SASRec:
 Feature engineering: Use two binning schemes, equal-width for score based features, log power for long tail count based features. Add rating variance as a feature.
-Recall: {'recall@k': 0.41360680340170086, 'ndcg@k': 0.10507680135862946}
+Recall: {'recall@k': 0.41907953976988493, 'ndcg@k': 0.10761581061933809, 'hit_rate@k': 0.41907953976988493} 
+(two tower result: [Recall] Warm-up Epoch 15/15, Loss = 7.6394, val_recall@100=0.4310, val_ndcg@100=0.1069)
 Evaluation: Add Hit rate for recall, coverage and GAUC for ranking. 
+
+
+
+
+Version 1.7:
+Recall: Add function to inspect user's target item, history item and recalled items, for analysis!!!
+Rank: Change the sampling logic completely, do not let ranking training take in consideration of the user_candidate from recall. Instead, use random sampling as negatives, and use the true item as the pos pair. ??? This would cause bias issue though? Since the evaluation phase the model will only see the items from user candidates.
 
 
 TODO:
 1. in batch neg for recall, punishing the popular item as negative too much? So during training, use cos(a,b) - log(pi) as the score instead.
 2. MMOE/PLE/ESSM for two tasks: one on engagement/ CTR proxy; one on satifaction/ rating quality.
-3. Completely change the logic of ranking sampling: use random data from the system instead of from the recall as negative item, always include the true test item.
 4. Switch batck to BPR loss for ranking lol.
-5. add a function to inspect what is the result from the recall and the rank; based on this decide whether to add hard negative sampling into the recall training.
 
 Eval setup
 Metric
@@ -85,10 +91,4 @@ Recall@10
 NDCG@10
 0.12 – 0.30
 
-If filtered base on rating >= 4:
-User side shape: torch.Size([6034, 256])
-Item side shape with titles: torch.Size([3533, 224])
 
-
-User side shape: torch.Size([6040, 256])
-Item side shape with titles: torch.Size([3706, 224])

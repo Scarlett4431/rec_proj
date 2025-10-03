@@ -1,0 +1,121 @@
+
+[RecallDebug] user=1
+  recent history (oldest→newest):
+    * 107: Demolition Man (1993)
+    * 137: Conspiracy Theory (1997)
+    * 60: Star Wars: Episode I - The Phantom Menace (1999)
+    * 91: Bodyguard, The (1992)
+    * 126: Twister (1996)
+    * 73: Snake Eyes (1998)
+    * 79: Outbreak (1995)
+    * 66: Jackal, The (1997)
+    * 86: Lost World: Jurassic Park, The (1997)
+    * 133: Armageddon (1998)
+  target 55: Shall We Dance? (Shall We Dansu?) (1996)
+  candidates:
+    01. 264: Speed (1994)
+    02. 461: Crimson Tide (1995)
+    03. 189: Men in Black (1997)
+    04. 428: Witness (1985)
+    05. 90: Patriot Games (1992)
+    06. 1109: Glory (1989)
+    07. 195: Rock, The (1996)
+    08. 433: In the Line of Fire (1993)
+    09. 210: Die Hard (1988)
+    10. 44: Star Wars: Episode IV - A New Hope (1977)
+    11. 386: Top Gun (1986)
+    12. 587: Batman (1989)
+    13. 160: Independence Day (ID4) (1996)
+    14. 895: Air Force One (1997)
+    15. 319: Tomorrow Never Dies (1997)
+    16. 1528: English Patient, The (1996)
+    17. 128: Silence of the Lambs, The (1991)
+    18. 432: Face/Off (1997)
+    19. 669: Godfather, The (1972)
+    20. 434: Godfather: Part II, The (1974)
+    ... truncated 80 of 100 total
+[RecallDebug] user=99
+  recent history (oldest→newest):
+    * 1850: Cutthroat Island (1995)
+    * 1084: Batman & Robin (1997)
+    * 1085: Anaconda (1997)
+    * 128: Silence of the Lambs, The (1991)
+    * 167: Shawshank Redemption, The (1994)
+    * 51: Fargo (1996)
+    * 67: GoodFellas (1990)
+    * 9: Wizard of Oz, The (1939)
+    * 109: Like Water for Chocolate (Como agua para chocolate) (1992)
+    * 1466: Apocalypse Now (1979)
+  target 258: Lone Star (1996)
+  candidates:
+    01. 78: Hunt for Red October, The (1990)
+    02. 264: Speed (1994)
+    03. 62: Total Recall (1990)
+    04. 195: Rock, The (1996)
+    05. 113: Jurassic Park (1993)
+    06. 151: Fugitive, The (1993)
+    07. 60: Star Wars: Episode I - The Phantom Menace (1999)
+    08. 166: Mask of Zorro, The (1998)
+    09. 97: Terminator 2: Judgment Day (1991)
+    10. 150: Clear and Present Danger (1994)
+    11. 216: Goldfinger (1964)
+    12. 210: Die Hard (1988)
+    13. 217: Terminator, The (1984)
+    14. 104: American Beauty (1999)
+    15. 6: Ben-Hur (1959)
+    16. 895: Air Force One (1997)
+    17. 126: Twister (1996)
+    18. 711: Lethal Weapon (1987)
+    19. 432: Face/Off (1997)
+    20. 643: Star Trek: The Wrath of Khan (1982)
+    ... truncated 80 of 100 total
+[RecallDebug] user=123
+  recent history (oldest→newest):
+    * 151: Fugitive, The (1993)
+    * 1916: Liberty Heights (1999)
+    * 1182: Some Folks Call It a Sling Blade (1993)
+    * 49: Secret Garden, The (1993)
+    * 67: GoodFellas (1990)
+    * 1106: Crying Game, The (1992)
+    * 945: Grifters, The (1990)
+    * 381: Babe (1995)
+    * 2438: End of the Affair, The (1999)
+    * 516: Boiler Room (2000)
+  target 447: Amistad (1997)
+  candidates:
+    01. 280: Good Will Hunting (1997)
+    02. 128: Silence of the Lambs, The (1991)
+    03. 167: Shawshank Redemption, The (1994)
+    04. 51: Fargo (1996)
+    05. 48: Saving Private Ryan (1998)
+    06. 383: Dead Man Walking (1995)
+    07. 246: L.A. Confidential (1997)
+    08. 244: Pulp Fiction (1994)
+    09. 38: Sixth Sense, The (1999)
+    10. 256: Insider, The (1999)
+    11. 529: Sling Blade (1996)
+    12. 44: Star Wars: Episode IV - A New Hope (1977)
+    13. 259: Usual Suspects, The (1995)
+    14. 134: Shakespeare in Love (1998)
+    15. 109: Like Water for Chocolate (Como agua para chocolate) (1992)
+    16. 505: Life Is Beautiful (La Vita è bella) (1997)
+    17. 92: Braveheart (1995)
+    18. 504: Leaving Las Vegas (1995)
+    19. 124: Star Wars: Episode V - The Empire Strikes Back (1980)
+    20. 1528: English Patient, The (1996)
+
+{'recall@k': 0.4032616308154077, 'ndcg@k': 0.10152309200436922, 'hit_rate@k': 0.4032616308154077}
+
+Observations
+
+Recall is dominated by blockbuster action/thriller titles (Speed, Die Hard, Rock, etc.) even when the gold items are dramas/arthouse (e.g. “Shall We Dance?”, “Lone Star”, “Amistad”). The two-tower similarity clearly overweights global popularity and coarse genre matches, underserving finer-grained tastes.
+Histories show fairly mixed consumption, but the model still returns a very narrow band of high-profile movies. This hints that our user/item feature encoding isn’t capturing subtler signals (e.g. tone, language, critical reception) or that the learned embeddings collapse toward popularity.
+Test metrics (~0.40 recall@100) confirm substantial gaps: the gold item is simply absent for all three debugged users.
+Improvements for the Two-Tower Recall
+
+Enrich features: incorporate stronger item semantics (plot/overview text, keywords, crew features) and richer user preference descriptors (genre distribution, recency-weighted signals). The current setup mainly sees high-level buckets and a title embedding; it likely can’t distinguish nuanced dramas from action hits.
+Balance negatives: revisit two-tower training negatives—add harder in-batch negatives, ensure popularity-balanced sampling, or mine semantically close counterexamples so the model learns to separate adjacent items.
+Reweight training loss: consider temperature tuning or margin-based objectives (e.g. sampled softmax, BPR) to reduce the tendency to converge on popular items.
+Regularise popularity: add inverse-popularity features or a debiasing term so the tower doesn’t equate “widely rated” with “best match”.
+Hybrid upgrade: keep blending but raise item-cf / covis weights or add MMR/diversification post-processing so long-tail but relevant items surface.
+Validation checks: compare recall when you reintroduce cached artifacts—ensure caches actually reflect current model; stale embeddings masquerading as up-to-date would keep the recall stuck.

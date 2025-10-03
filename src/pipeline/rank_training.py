@@ -23,7 +23,7 @@ class RankTrainingConfig:
     lr: float = 5e-3
     num_negatives: int = 5
     rank_k: int = 10
-    model_type: str = "din"  # choices: dcn, din, deepfm, sasrec, dcn_din
+    model_type: str = "deepfm"  # choices: dcn, din, deepfm, sasrec, dcn_din
     cross_layers: int = 3
     hidden_dims: tuple = (256, 128)
     dropout: float = 0.2
@@ -42,6 +42,7 @@ class RankTrainingConfig:
 class RankTrainingOutputs:
     ranker: nn.Module
     metrics: dict
+    max_history: int
 
 
 def train_ranker_model(
@@ -96,7 +97,6 @@ def train_ranker_model(
         item_emb=item_emb_dataset,
         user_feat_tensor=user_feat_dataset,
         item_feat_tensor=item_feat_dataset,
-        user_candidates=user_candidates,
     )
 
     loader_kwargs = dict(
@@ -319,4 +319,8 @@ def train_ranker_model(
                 f"[Timing][Rank] Test evaluation took {time.time() - eval_start:.2f}s"
             )
 
-    return RankTrainingOutputs(ranker=ranker, metrics=metrics)
+    return RankTrainingOutputs(
+        ranker=ranker,
+        metrics=metrics,
+        max_history=rank_dataset.max_history,
+    )

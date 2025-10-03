@@ -93,7 +93,7 @@ def build_feature_components(
         proj_dim=32,
     ).to(device)
 
-    user_multi_max = {"watched_items": 50, "favorite_genres": 3}
+    user_multi_max = {"watched_items": 50, "favorite_genres": 10}
     item_multi_max = {"item_genres": 5}
 
     user_feature_cache = user_store.get_batch(list(range(num_users)), max_multi_lengths=user_multi_max)
