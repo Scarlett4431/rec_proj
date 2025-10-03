@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -18,10 +19,13 @@ from src.recall.two_tower import TwoTowerModel
 @dataclass
 class RecallTrainingConfig:
     batch_size: int = 1024
-    warmup_epochs: int = 15
-    easy_neg_samples: int = 5
+    warmup_epochs: int = 6
+    easy_neg_samples: int = 3
+    tail_neg_samples: int = 2
     hard_neg_samples: int = 1        
     hard_neg_k: int = 50             
+    tail_sampling_alpha: float = 0.75
+    tail_sampling_smoothing: float = 1.0
     embed_dim: int = 64
     tower_dropout: float = 0.1
     emb_lr: float = 5e-3
@@ -58,6 +62,9 @@ def train_two_tower_model(
         easy_neg_samples=config.easy_neg_samples,
         hard_neg_k=config.hard_neg_k,              
         hard_neg_samples=config.hard_neg_samples,  
+        tail_neg_samples=config.tail_neg_samples,
+        tail_sampling_alpha=config.tail_sampling_alpha,
+        tail_sampling_smoothing=config.tail_sampling_smoothing,
         num_items=num_items,
     )
     recall_loader = DataLoader(
@@ -187,12 +194,40 @@ def train_two_tower_model(
             )
             forward_time += time.time() - t0
 
-            neg_items = batch["easy_neg_items"].to(device)
-            if neg_items.numel() > 0:
+            neg_item_tensors = []
+            for neg_key in ("easy_neg_items", "tail_neg_items", "hard_neg_items"):
+                if neg_key not in batch:
+                    continue
+                neg_tensor = batch[neg_key]
+                if not isinstance(neg_tensor, torch.Tensor) or neg_tensor.numel() == 0:
+                    continue
+                neg_tensor = neg_tensor.to(device)
+                mask = neg_tensor >= 0
+                if mask.any():
+                    neg_item_tensors.append(neg_tensor[mask])
+
+            if neg_item_tensors:
                 timer_start = time.perf_counter()
-                valid_mask = neg_items >= 0
-                if valid_mask.any():
-                    neg_item_ids = neg_items[valid_mask]
+                neg_item_ids = torch.unique(torch.cat(neg_item_tensors, dim=0))
+                if neg_item_ids.numel() > 0:
+                    if pos_items.numel() > 0:
+                        pos_unique = pos_items.unique()
+                        if pos_unique.numel() > 0:
+                            if hasattr(torch, "isin"):
+                                keep_mask = ~torch.isin(neg_item_ids, pos_unique)
+                            else:
+                                cpu_mask = ~torch.as_tensor(
+                                    np.isin(
+                                        neg_item_ids.detach().cpu().numpy(),
+                                        pos_unique.detach().cpu().numpy(),
+                                    ),
+                                    device=neg_item_ids.device,
+                                )
+                                keep_mask = cpu_mask
+                            neg_item_ids = neg_item_ids[keep_mask]
+                    if neg_item_ids.numel() == 0:
+                        _ = time.perf_counter() - timer_start
+                        continue
                     neg_feats = encode_cached_batch(
                         feature_components.item_feature_cache,
                         feature_components.item_encoder,
