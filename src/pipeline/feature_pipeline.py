@@ -44,34 +44,53 @@ def build_feature_components(
         "user_idx",
         numeric_cols=[],
         cat_cols=["temporal_preference"],
-        multi_cat_cols=["watched_items", "favorite_genres"],
+        multi_cat_cols=["watched_items", "recent_items", "favorite_genres", "recent_genres"],
         bucket_cols=[
             "user_total_ratings",
             "user_avg_rating",
             "user_rating_variance",
             "user_recency_days",
             "user_avg_release_year",
+            "user_genre_entropy",
+            "user_recent_rating",
         ],
         bucket_bins=10,
         bucket_strategies={
             "user_total_ratings": "log",
             "user_rating_variance": "linear",
             "user_recency_days": "log",
+            "user_genre_entropy": "linear",
+            "user_recent_rating": "linear",
         },
     )
 
-    item_numeric_cols = ["item_total_ratings", "item_avg_rating", "item_release_year", "item_rating_variance"]
+    item_bucket_cols = [
+        "item_total_ratings",
+        "item_avg_rating",
+        "item_release_year",
+        "item_rating_variance",
+        "item_interaction_count",
+        "item_interaction_log",
+        "item_recency_days",
+        "item_genre_count",
+        "item_popularity_rank",
+    ]
     item_store = FeatureStore(
         item_feats_df,
         "item_idx",
         numeric_cols=[],
         cat_cols=[],
         multi_cat_cols=["item_genres"],
-        bucket_cols=item_numeric_cols,
+        bucket_cols=item_bucket_cols,
         bucket_bins=10,
         bucket_strategies={
             "item_total_ratings": "log",
             "item_rating_variance": "linear",
+            "item_interaction_count": "log",
+            "item_interaction_log": "linear",
+            "item_recency_days": "log",
+            "item_genre_count": "linear",
+            "item_popularity_rank": "linear",
         },
     )
 
@@ -93,8 +112,13 @@ def build_feature_components(
         proj_dim=32,
     ).to(device)
 
-    user_multi_max = {"watched_items": 50, "favorite_genres": 10}
-    item_multi_max = {"item_genres": 5}
+    user_multi_max = {
+        "watched_items": 100,
+        "recent_items": 20,
+        "favorite_genres": 20,
+        "recent_genres": 10,
+    }
+    item_multi_max = {"item_genres": 10, "item_title_tokens": 12}
 
     user_feature_cache = user_store.get_batch(list(range(num_users)), max_multi_lengths=user_multi_max)
     item_feature_cache = item_store.get_batch(list(range(num_items)), max_multi_lengths=item_multi_max)

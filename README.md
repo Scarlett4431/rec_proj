@@ -61,15 +61,16 @@ Recall: {'recall@k': 0.41907953976988493, 'ndcg@k': 0.10761581061933809, 'hit_ra
 Evaluation: Add Hit rate for recall, coverage and GAUC for ranking. 
 
 
-
-
 Version 1.7:
-Recall: Add function to inspect user's target item, history item and recalled items, for analysis!!!
+Add function to inspect user's target item, history item and recalled items, for analysis. Usage: RECALL_DEBUG_USER=42,99, RANK_DEBUG_USER=42,99. Add debug for recall to compute the user score against pos and random neg.
+Recall: Add three difference negative sampling logics for two-tower: easy/tail/hard, split into two stage training, first stage only using easy and tail, second stage add in hard. Add a heuristic recall stream based on user fav genres, each genre return items sorted by popularity.
 Rank: Change the sampling logic completely, do not let ranking training take in consideration of the user_candidate from recall. Instead, use random sampling as negatives, and use the true item as the pos pair. ??? This would cause bias issue though? Since the evaluation phase the model will only see the items from user candidates.
+Evaluation: add RANK_SKIP_MISSING=1. Now finally pure ranking result is higher than 0.5.
+Feature: Add a few more features both on user and item.
 
+Hybrid Recall Eval (after warm-up): {'recall@k': 0.4329364682341171, 'ndcg@k': 0.11021633020492437, 'hit_rate@k': 0.4329364682341171}
 
 TODO:
-1. in batch neg for recall, punishing the popular item as negative too much? So during training, use cos(a,b) - log(pi) as the score instead.
 2. MMOE/PLE/ESSM for two tasks: one on engagement/ CTR proxy; one on satifaction/ rating quality.
 4. Switch batck to BPR loss for ranking lol.
 

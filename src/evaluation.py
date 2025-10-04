@@ -83,6 +83,7 @@ def evaluate_ranker_with_candidates(
     user_histories: Dict[int, List[int]] | None = None,
     max_history: int = 50,
     batch_size: int = 4096,
+    skip_missing_candidates: bool = False,
 ):
     """Evaluate ranker using precomputed recall candidates."""
     if user_emb.device != device:
@@ -95,6 +96,7 @@ def evaluate_ranker_with_candidates(
         item_feat_matrix = item_feat_matrix.to(device)
 
     results = {"recall@k": [], "ndcg@k": [], "gauc@k": []}
+    skipped = 0
 
     requires_history = getattr(ranker, "requires_history", False)
 
@@ -249,9 +251,16 @@ def evaluate_ranker_with_candidates(
     for u, true_item in test_pairs:
         candidate_items = user_candidates.get(u, [])
         if not candidate_items:
+            if skip_missing_candidates:
+                skipped += 1
+                continue
             results["recall@k"].append(0.0)
             results["ndcg@k"].append(0.0)
             results["gauc@k"].append(0.0)
+            continue
+
+        if skip_missing_candidates and true_item not in candidate_items:
+            skipped += 1
             continue
 
         cand_tensor = torch.as_tensor(candidate_items, dtype=torch.long, device=device)
@@ -265,4 +274,10 @@ def evaluate_ranker_with_candidates(
 
     process_pending()
 
-    return {k: float(np.mean(v)) for k, v in results.items()}
+    metrics = {
+        key: (float(np.mean(vals)) if vals else 0.0)
+        for key, vals in results.items()
+    }
+    if skip_missing_candidates:
+        metrics["skipped_users"] = skipped
+    return metrics

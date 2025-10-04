@@ -1,3 +1,7 @@
+import math
+from collections import Counter
+
+import numpy as np
 import pandas as pd
 
 
@@ -22,6 +26,11 @@ def build_user_features(ratings, movies, top_k_genres=3, temporal_margin=5.0):
     watched_map = {
         user: group["item_idx"].tolist()
         for user, group in watched_sequences
+    }
+    recent_window = 20
+    recent_map = {
+        user: group.head(recent_window)["item_idx"].tolist()
+        for user, group in ratings_sorted.groupby("user_idx")
     }
 
     # Build per-user genre preference list (top-k by interaction count, tie-broken by rating sum).
@@ -63,7 +72,8 @@ def build_user_features(ratings, movies, top_k_genres=3, temporal_margin=5.0):
     else:
         genre_pref_map = {}
 
-    user_basic["watched_items"] = user_basic["user_idx"].map(lambda u: watched_map.get(u, []))
+    user_basic["watched_items"] = user_basic["user_idx"].map(lambda u: watched_map.get(u, [])[:100])
+    user_basic["recent_items"] = user_basic["user_idx"].map(lambda u: recent_map.get(u, [])[:recent_window])
     user_basic["favorite_genres"] = user_basic["user_idx"].map(lambda u: genre_pref_map.get(u, []))
 
     # Temporal preference: weighted average release year + categorical preference bucket.
@@ -99,5 +109,56 @@ def build_user_features(ratings, movies, top_k_genres=3, temporal_margin=5.0):
         return "balanced"
 
     user_basic["temporal_preference"] = user_basic["user_avg_release_year"].apply(_temporal_bucket)
+
+    # Genre distribution & entropy
+    def _genre_entropy(user):
+        genres = []
+        if user in genre_pref_map:
+            genres.extend(genre_pref_map[user])
+        user_ratings = exploded[exploded["user_idx"] == user]
+        if not user_ratings.empty:
+            genres.extend(user_ratings["item_genres"].tolist())
+        if not genres:
+            return 0.0
+        counts = Counter(genres)
+        total = float(sum(counts.values()))
+        probs = [cnt / total for cnt in counts.values() if cnt > 0]
+        entropy = -sum(p * math.log(p + 1e-12) for p in probs)
+        return float(entropy)
+
+    user_basic["user_genre_entropy"] = user_basic["user_idx"].map(_genre_entropy).fillna(0.0)
+
+    # Recent genres extracted from latest interactions
+    recent_genre_map = {}
+    if not ratings_with_meta.empty:
+        recent_meta = ratings_with_meta.sort_values(["user_idx", "timestamp"], ascending=[True, False])
+        grouped = recent_meta.groupby("user_idx")
+        for user, group in grouped:
+            genres = []
+            for genre_list in group["item_genres"]:
+                if isinstance(genre_list, list):
+                    genres.extend(genre_list)
+                if len(genres) >= recent_window:
+                    break
+            recent_genre_map[user] = genres[:recent_window]
+
+    user_basic["recent_genres"] = user_basic["user_idx"].map(lambda u: recent_genre_map.get(u, []))
+
+    # Recency-weighted rating average over recent interactions
+    recent_avg_map = {}
+    for user, items in recent_map.items():
+        if not items:
+            continue
+        subset = ratings_sorted[(ratings_sorted["user_idx"] == user) & (ratings_sorted["item_idx"].isin(items))]
+        if subset.empty:
+            continue
+        weights = np.linspace(1.0, 2.0, num=len(subset))
+        vals = subset["rating"].to_numpy()
+        recent_avg_map[user] = float(np.dot(vals, weights[: len(vals)]) / weights[: len(vals)].sum())
+
+    default_avg_map = dict(zip(user_basic["user_idx"], user_basic["user_avg_rating"]))
+    user_basic["user_recent_rating"] = user_basic["user_idx"].map(
+        lambda u: recent_avg_map.get(u, default_avg_map.get(u, 0.0))
+    )
 
     return user_basic

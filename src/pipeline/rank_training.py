@@ -23,7 +23,7 @@ class RankTrainingConfig:
     lr: float = 5e-3
     num_negatives: int = 5
     rank_k: int = 10
-    model_type: str = "deepfm"  # choices: dcn, din, deepfm, sasrec, dcn_din
+    model_type: str = "dcn"  # choices: dcn, din, deepfm, sasrec, dcn_din
     cross_layers: int = 3
     hidden_dims: tuple = (256, 128)
     dropout: float = 0.2
@@ -60,6 +60,7 @@ def train_ranker_model(
     user_histories: Dict[int, List[int]] | None,
     device: torch.device,
     config: RankTrainingConfig = RankTrainingConfig(),
+    skip_missing_eval: bool = False,
 ) -> RankTrainingOutputs:
     user_emb_cpu = user_embeddings.detach().contiguous().cpu()
     item_emb_cpu = item_embeddings.detach().contiguous().cpu()
@@ -263,6 +264,7 @@ def train_ranker_model(
                 user_histories=user_histories,
                 max_history=rank_dataset.max_history,
                 batch_size=config.eval_batch_size,
+                skip_missing_candidates=skip_missing_eval,
             )
             eval_time = time.time() - eval_start
 
@@ -314,6 +316,7 @@ def train_ranker_model(
                 user_histories=user_histories,
                 max_history=rank_dataset.max_history,
                 batch_size=config.eval_batch_size,
+                skip_missing_candidates=skip_missing_eval,
             )
             print(
                 f"[Timing][Rank] Test evaluation took {time.time() - eval_start:.2f}s"

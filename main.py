@@ -57,8 +57,7 @@ def main():
     step_time = time.time()
     cache_data = load_recall_cache(cache_dir)
     print(f"[Timing] Cache lookup took {time.time() - step_time:.2f}s")
-    # if cache_data is not None:
-    if False:
+    if cache_data is not None:
         print("Loaded recall artifacts from cache.")
         (
             user_embeddings,
@@ -88,6 +87,7 @@ def main():
         step_time = time.time()
         candidate_sources = build_candidate_sources(
             data.train,
+            data.movies,
             data.num_users,
             data.user_consumed,
         )
@@ -100,11 +100,11 @@ def main():
             data.user_consumed,
             candidate_sources,
             candidate_k=100,
-            faiss_weight=1.0,
-            # covis_weight=0.4,
-            # faiss_weight=0.6,
-            # itemcf_weight=0.3,
-            # popular_weight=0.1,
+            faiss_weight=0.8,
+            covis_weight=0.4,
+            itemcf_weight=0.4,
+            popular_weight=0,
+            genre_weight=0.2,
         )
         print(f"[Timing] Hybrid candidate building took {time.time() - step_time:.2f}s")
 
@@ -176,6 +176,8 @@ def main():
                     history_k=10,
                     top_k=20,
                 )
+    skip_missing_rank_env = os.environ.get("RANK_SKIP_MISSING", "")
+    skip_missing_rank_eval = skip_missing_rank_env.lower() in ("1", "true", "yes")
     step_time = time.time()
     rank_outputs = train_ranker_model(
         data.train,
@@ -192,10 +194,13 @@ def main():
         data.user_histories,
         device,
         config=RankTrainingConfig(),
+        skip_missing_eval=skip_missing_rank_eval,
     )
     print(f"[Timing] Rank training took {time.time() - step_time:.2f}s")
 
     print("Ranker Eval (Hybrid Recall+Rank):", rank_outputs.metrics)
+    if skip_missing_rank_eval:
+        print("[RankEval] Skipped users without gold candidates (pure ranking view)")
 
     rank_debug_env = os.environ.get("RANK_DEBUG_USER")
     if rank_debug_env:
