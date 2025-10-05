@@ -1,5 +1,21 @@
 import torch
+import torch.nn.functional as F
 import torch.nn as nn
+
+def bpr_loss(pos_scores: torch.Tensor, neg_scores: torch.Tensor, weight: float = 1.0) -> torch.Tensor:
+    """Bayesian Personalized Ranking loss.
+
+    Args:
+        pos_scores: shape [B, 1] or [B]
+        neg_scores: shape [B, K]
+    Returns:
+        scalar loss
+    """
+    if pos_scores.dim() == 1:
+        pos_scores = pos_scores.unsqueeze(-1)
+    diff = pos_scores - neg_scores  # [B, K]
+    return -weight * torch.mean(F.logsigmoid(diff))
+
 
 class InBatchSoftmaxLoss(nn.Module):
     """

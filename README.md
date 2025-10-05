@@ -45,9 +45,6 @@ Restructure the code for readability.
 Result:
 Recall:
 Hybrid Recall Eval (after warm-up): {'recall@k': 0.40760380190095047, 'ndcg@k': 0.10393681505170957}
-Rank:
-    Using DeepFM: Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.05467733866933467, 'ndcg@k': 0.0254182768799728}
-    Using DCN:    Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.06407203601800901, 'ndcg@k': 0.03007650543344327}
 
 
 Version 1.6:
@@ -70,26 +67,17 @@ Feature: Add a few more features both on user and item.
 
 Hybrid Recall Eval (after warm-up): {'recall@k': 0.4329364682341171, 'ndcg@k': 0.11021633020492437, 'hit_rate@k': 0.4329364682341171}
 
+
+Version 1.8:
+1. Ranking from BCE loss to BPR loss.
+2. Rank include both random neg and hard neg from recall candidate pool.
+
+
 TODO:
 2. MMOE/PLE/ESSM for two tasks: one on engagement/ CTR proxy; one on satifaction/ rating quality.
 4. Switch batck to BPR loss for ranking lol.
 
-Eval setup
-Metric
-Typical range
-Random-negatives (1 pos + 99 random negs)
-GAUC
-0.85 – 0.95
-Recall@10
-0.60 – 0.80
-NDCG@10
-0.45 – 0.70
-Candidate-based (your hybrid/FAISS/covis)
-GAUC
-0.70 – 0.90 (harder set)
-Recall@10
-0.20 – 0.45 (depends a lot on candidate quality & coverage)
-NDCG@10
-0.12 – 0.30
 
 
+Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.14383810116086235, 'ndcg@k': 0.07116824611376746, 'gauc@k': 0.6195339851667587, 'skipped_users': 51384}
+Ranker Eval (Hybrid Recall+Rank): {'recall@k': 0.11999896351575456, 'ndcg@k': 0.058734616295504034, 'gauc@k': 0.6513248676650418, 'skipped_users': 51384}

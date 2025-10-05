@@ -62,13 +62,15 @@ def train_two_tower_model(
         train_df,
         feature_components.user_store,
         feature_components.item_store,
-        easy_neg_samples=config.easy_neg_samples,
-        hard_neg_k=0,
-        hard_neg_samples=0,
-        tail_neg_samples=config.tail_neg_samples,
-        tail_sampling_alpha=config.tail_sampling_alpha,
-        tail_sampling_smoothing=config.tail_sampling_smoothing,
         num_items=num_items,
+        negative_cfg=NegativeConfig(
+            easy=config.easy_neg_samples,
+            tail=config.tail_neg_samples,
+            hard=0,
+            tail_alpha=config.tail_sampling_alpha,
+            tail_smoothing=config.tail_sampling_smoothing,
+            hard_k=0,
+        ),
     )
     warmup_loader = DataLoader(
         warmup_dataset,
@@ -446,14 +448,16 @@ def train_two_tower_model(
             train_df,
             feature_components.user_store,
             feature_components.item_store,
-            item_emb=hard_item_emb,
-            easy_neg_samples=config.easy_neg_samples,
-            hard_neg_k=config.hard_neg_k,
-            hard_neg_samples=config.hard_neg_samples,
-            tail_neg_samples=config.tail_neg_samples,
-            tail_sampling_alpha=config.tail_sampling_alpha,
-            tail_sampling_smoothing=config.tail_sampling_smoothing,
             num_items=num_items,
+            negative_cfg=NegativeConfig(
+                easy=config.easy_neg_samples,
+                tail=config.tail_neg_samples,
+                hard=config.hard_neg_samples,
+                tail_alpha=config.tail_sampling_alpha,
+                tail_smoothing=config.tail_sampling_smoothing,
+                hard_k=config.hard_neg_k,
+            ),
+            item_emb=hard_item_emb,
         )
 
         hard_loader = DataLoader(
