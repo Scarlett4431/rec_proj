@@ -6,8 +6,6 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from src.features.feature_store import FeatureStore
-
 
 @dataclass(frozen=True)
 class RankDatasetConfig:
@@ -23,8 +21,6 @@ class RankDataset(Dataset):
         self,
         ratings_df,
         num_items,
-        user_store: FeatureStore,
-        item_store: FeatureStore,
         config: RankDatasetConfig = RankDatasetConfig(),
         positive_pairs: Sequence[Tuple[int, int]] | None = None,
         append_positive_to_history: bool | None = None,
@@ -35,14 +31,17 @@ class RankDataset(Dataset):
 
         self.cfg = config
         self.num_items = int(num_items)
-        self.user_store = user_store
-        self.item_store = item_store
         self.user_candidates = user_candidates or {}
         self.rng = np.random.default_rng()
         self.catalog = np.arange(self.num_items, dtype=np.int64)
 
-        self.user_rated: Dict[int, frozenset[int]] = {}
         ratings_sorted = ratings_df.sort_values(["user_idx", "timestamp"])
+        rating_lookup: Dict[Tuple[int, int], float] = {}
+        if "rating" in ratings_sorted.columns:
+            for row in ratings_sorted.itertuples():
+                rating_lookup[(int(row.user_idx), int(row.item_idx))] = float(row.rating)
+
+        self.user_rated: Dict[int, frozenset[int]] = {}
         for user, group in ratings_sorted.groupby("user_idx", sort=False):
             items = group["item_idx"].astype(int).tolist()
             self.user_rated[int(user)] = frozenset(items)
@@ -53,15 +52,16 @@ class RankDataset(Dataset):
             self.append_positive_to_history = bool(append_positive_to_history)
 
         self.base_examples = self._build_base_examples(
-            ratings_sorted, positive_pairs
+            ratings_sorted, positive_pairs, rating_lookup
         )
 
     def _build_base_examples(
         self,
         ratings_sorted,
         positive_pairs: Sequence[Tuple[int, int]] | None,
-    ) -> List[Tuple[int, int, List[int]]]:
-        examples: List[Tuple[int, int, List[int]]] = []
+        rating_lookup: Dict[Tuple[int, int], float],
+    ) -> List[Tuple[int, int, List[int], float]]:
+        examples: List[Tuple[int, int, List[int], float]] = []
         history_cache: Dict[int, List[int]] = defaultdict(list)
 
         if positive_pairs is None:
@@ -70,7 +70,10 @@ class RankDataset(Dataset):
                 history: List[int] = []
                 for row in group.itertuples():
                     item = int(row.item_idx)
-                    examples.append((user_int, item, history[-self.cfg.max_history :]))
+                    rating = rating_lookup.get((user_int, item), 1.0)
+                    examples.append(
+                        (user_int, item, history[-self.cfg.max_history :], rating)
+                    )
                     history.append(item)
                     history_cache[user_int] = history
         else:
@@ -78,7 +81,10 @@ class RankDataset(Dataset):
                 user_int = int(raw_user)
                 item_int = int(raw_item)
                 history = history_cache.get(user_int, [])
-                examples.append((user_int, item_int, history[-self.cfg.max_history :]))
+                rating = rating_lookup.get((user_int, item_int), 1.0)
+                examples.append(
+                    (user_int, item_int, history[-self.cfg.max_history :], rating)
+                )
                 if self.append_positive_to_history:
                     history.append(item_int)
                     history_cache[user_int] = history
@@ -92,12 +98,13 @@ class RankDataset(Dataset):
         return len(self.base_examples)
 
     def __getitem__(self, idx: int):
-        user_id, pos_item, history = self.base_examples[idx]
-        history_tensor = torch.full(
-            (self.cfg.max_history,), -1, dtype=torch.long
-        )
+        user_id, pos_item, history, rating = self.base_examples[idx]
+        history_tensor = torch.full((self.cfg.max_history,), -1, dtype=torch.long)
         if history:
             trimmed = history[-self.cfg.max_history :]
+        else:
+            trimmed = []
+        if trimmed:
             history_tensor[-len(trimmed) :] = torch.as_tensor(trimmed, dtype=torch.long)
 
         negatives = self._sample_negatives(user_id, pos_item)
@@ -106,7 +113,8 @@ class RankDataset(Dataset):
             "pos_item": torch.tensor(pos_item, dtype=torch.long),
             "neg_items": torch.as_tensor(negatives, dtype=torch.long),
             "hist_items": history_tensor,
-            "hist_len": torch.tensor(len(history), dtype=torch.long),
+            "hist_len": torch.tensor(len(trimmed), dtype=torch.long),
+            "pos_rating": torch.tensor(rating, dtype=torch.float),
         }
 
     @property

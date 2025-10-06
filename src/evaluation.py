@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 from src.faiss_index import FaissIndex
-from typing import Dict, Iterable, List, Mapping, Optional, Tuple
+from collections import defaultdict
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
 def recall_at_k(pred_items, true_item, k=10):
@@ -14,27 +15,48 @@ def ndcg_at_k(pred_items, true_item, k=10):
     return 0.0
 
 
-def evaluate_candidates(candidate_map, test_pairs, k=100):
-    """Evaluate recall metrics for arbitrary candidate pools."""
+def _group_truth(pairs: Sequence[Tuple[int, int]]) -> Dict[int, List[int]]:
+    grouped: Dict[int, List[int]] = defaultdict(list)
+    for user, item in pairs:
+        grouped[int(user)].append(int(item))
+    return grouped
+
+
+def evaluate_candidates(candidate_map, test_pairs, k=100, skip_missing=False):
+    """Evaluate recall metrics for candidate pools on a per-user basis."""
+    user_truth = _group_truth(test_pairs)
     hits = []
     ndcgs = []
-    for u, true_item in test_pairs:
-        candidates = candidate_map.get(u, [])[:k]
+
+    for user, positives in user_truth.items():
+        candidates = candidate_map.get(user, [])[:k]
         if not candidates:
+            if not skip_missing:
+                hits.append(0.0)
+                ndcgs.append(0.0)
+            continue
+
+        indices = [candidates.index(pos) for pos in positives if pos in candidates]
+        if not indices:
+            if skip_missing:
+                continue
             hits.append(0.0)
             ndcgs.append(0.0)
             continue
-        if true_item in candidates:
-            idx = candidates.index(true_item)
-            hits.append(1.0)
-            ndcgs.append(1.0 / np.log2(idx + 2))
-        else:
-            hits.append(0.0)
-            ndcgs.append(0.0)
+
+        best_rank = min(indices)
+        hits.append(1.0)
+        ndcgs.append(1.0 / np.log2(best_rank + 2))
+
+    if not hits:
+        return {"recall@k": 0.0, "ndcg@k": 0.0, "hit_rate@k": 0.0}
+
+    recall = float(np.mean(hits))
+    ndcg = float(np.mean(ndcgs))
     return {
-        "recall@k": float(np.mean(hits)) if hits else 0.0,
-        "ndcg@k": float(np.mean(ndcgs)) if ndcgs else 0.0,
-        "hit_rate@k": float(np.mean(hits)) if hits else 0.0,
+        "recall@k": recall,
+        "ndcg@k": ndcg,
+        "hit_rate@k": recall,
     }
 
 
@@ -178,8 +200,8 @@ def evaluate_ranker_with_candidates(
             hist_mask_batch = None
 
         with torch.no_grad():
-            if requires_history:
-                scores = ranker(
+            outputs = (
+                ranker(
                     u_emb_batch,
                     i_emb_batch,
                     u_feats=u_feat_batch,
@@ -187,13 +209,21 @@ def evaluate_ranker_with_candidates(
                     hist_emb=hist_emb_batch,
                     hist_mask=hist_mask_batch,
                 )
-            else:
-                scores = ranker(
+                if requires_history
+                else ranker(
                     u_emb_batch,
                     i_emb_batch,
                     u_feats=u_feat_batch,
                     i_feats=i_feat_batch,
                 )
+            )
+
+        if isinstance(outputs, tuple):
+            scores = outputs[0]
+        elif isinstance(outputs, dict):
+            scores = outputs.get("rank", outputs.get("score"))
+        else:
+            scores = outputs
 
         scores = scores.view(-1)
 

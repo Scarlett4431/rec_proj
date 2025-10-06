@@ -8,6 +8,7 @@ import pandas as pd
 from src.recall.covisitation import build_covisitation_index, build_user_covisitation_candidates
 from src.recall.item_cf import build_item_cf_index, build_user_itemcf_candidates
 from src.recall.popularity import build_popular_items, build_user_popularity_candidates
+from src.recall.genre import build_genre_sources
 from src.recall.hybrid import merge_candidate_lists
 from src.faiss_index import FaissIndex
 
@@ -21,7 +22,7 @@ class CandidateSources:
     itemcf_user_candidates: Dict[int, list]
     popular_user_candidates: Dict[int, list]
     genre_item_map: Dict[str, list]
-    user_top_genres: Dict[int, list]
+    genre_user_candidates: Dict[int, list]
 
 
 def build_candidate_sources(
@@ -61,7 +62,7 @@ def build_candidate_sources(
         user_consumed=user_consumed,
     )
 
-    genre_item_map, user_top_genres = _build_genre_sources(
+    genre_item_map, genre_user_candidates = build_genre_sources(
         train_df,
         movies_df,
         user_consumed,
@@ -77,7 +78,7 @@ def build_candidate_sources(
         itemcf_user_candidates=itemcf_user_candidates,
         popular_user_candidates=popular_user_candidates,
         genre_item_map=genre_item_map,
-        user_top_genres=user_top_genres,
+        genre_user_candidates=genre_user_candidates,
     )
 
 
@@ -113,18 +114,8 @@ def build_hybrid_candidates(
         popular_list = sources.popular_user_candidates.get(u, [])
 
         genre_boost = []
-        if genre_weight > 0 and sources.user_top_genres:
-            seen = set()
-            for genre in sources.user_top_genres.get(u, []):
-                for item_id in sources.genre_item_map.get(genre, []):
-                    if item_id in consumed or item_id in seen:
-                        continue
-                    genre_boost.append(item_id)
-                    seen.add(item_id)
-                    if len(genre_boost) >= genre_boost_limit:
-                        break
-                if len(genre_boost) >= genre_boost_limit:
-                    break
+        if genre_weight > 0:
+            genre_boost = sources.genre_user_candidates.get(u, [])[:genre_boost_limit]
 
         user_candidates[u] = merge_candidate_lists(
             [
@@ -138,61 +129,3 @@ def build_hybrid_candidates(
         )
 
     return user_candidates
-
-
-def _build_genre_sources(
-    train_df,
-    movies_df: pd.DataFrame,
-    user_consumed,
-    genre_top_k: int,
-    genre_item_limit: int,
-):
-    if movies_df is None or movies_df.empty:
-        return {}, {}
-
-    movies = movies_df.copy()
-    genres_series = movies.get("genres")
-    if genres_series is None:
-        return {}, {}
-
-    if genres_series.dtype != object or not isinstance(genres_series.iloc[0], list):
-        genres_series = genres_series.fillna("").apply(
-            lambda s: [g for g in str(s).split("|") if g and g != "(no genres listed)"]
-        )
-    movies["genres_list"] = genres_series
-
-    item_genres = movies.set_index("item_idx")["genres_list"].to_dict()
-
-    # Build genre -> items sorted by popularity within training data
-    item_popularity = train_df["item_idx"].value_counts()
-    genre_item_map: Dict[str, list] = {}
-    for item_id, genres in item_genres.items():
-        if not isinstance(genres, list):
-            continue
-        pop = item_popularity.get(item_id, 0)
-        for genre in genres:
-            genre_item_map.setdefault(genre, []).append((pop, item_id))
-
-    for genre, pairs in genre_item_map.items():
-        pairs.sort(key=lambda tup: (-tup[0], tup[1]))
-        genre_item_map[genre] = [item for _, item in pairs[:genre_item_limit]]
-
-    # Build per-user top genres
-    merged = train_df.merge(
-        movies[["item_idx", "genres_list"]],
-        on="item_idx",
-        how="left",
-    )
-    exploded = merged.explode("genres_list").dropna(subset=["genres_list"])
-    if exploded.empty:
-        return genre_item_map, {}
-
-    genre_counts = (
-        exploded.groupby(["user_idx", "genres_list"])["item_idx"].count().reset_index(name="count")
-    )
-    genre_counts = genre_counts.sort_values(["user_idx", "count", "genres_list"], ascending=[True, False, True])
-    user_top_genres = (
-        genre_counts.groupby("user_idx")["genres_list"].apply(lambda s: s.head(genre_top_k).tolist()).to_dict()
-    )
-
-    return genre_item_map, user_top_genres

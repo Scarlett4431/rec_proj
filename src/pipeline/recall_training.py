@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from src.dataset.recall_dataset import RecallDataset
+from src.dataset.recall_dataset import RecallDataset, NegativeConfig
 from src.features.feature_utils import encode_cached_batch, encode_features
 from src.losses import InBatchSoftmaxLoss
 from src.evaluation import evaluate_filtered_faiss
@@ -19,13 +19,13 @@ from src.recall.two_tower import TwoTowerModel
 @dataclass
 class RecallTrainingConfig:
     batch_size: int = 256
-    k: int = 100
+    k: int = 150
     warmup_epochs: int = 20
     easy_neg_samples: int = 3
     tail_neg_samples: int = 3
     hard_neg_samples: int = 0        
     hard_neg_k: int = 50             
-    tail_sampling_alpha: float = 1
+    tail_sampling_alpha: float = -1
     tail_sampling_smoothing: float = 1.0
     hard_neg_epochs: int = 30
     embed_dim: int = 64
@@ -142,7 +142,7 @@ def train_two_tower_model(
             if feature_components.item_title_dim > 0 and feature_components.item_title_proj is not None:
                 projected_titles = feature_components.item_title_proj(feature_components.item_title_embeddings)
                 item_side = torch.cat([item_side, projected_titles], dim=1)
-                print(f"Item side shape with titles: {item_side.shape}")
+                print(f"Item side with titles shape: {item_side.shape}")
 
             user_emb = model.user_embed(user_ids.to(device), user_feats=user_side)
             item_emb = model.item_embed(item_ids.to(device), item_feats=item_side)

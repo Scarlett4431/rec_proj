@@ -2,6 +2,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 import torch.nn as nn
+import torch.nn.functional as F
 import torch
 import torch.optim as optim
 from torch.utils.data import DataLoader
@@ -13,6 +14,7 @@ from src.rank.dcn import DCNRanker
 from src.rank.dcn_din import DCNDINRanker
 from src.rank.deepfm import DeepFM
 from src.rank.din import DINRanker
+from src.rank.mmoe import MMOERanker
 from src.rank.sasrec import SASRecRanker
 
 
@@ -25,7 +27,8 @@ class RankTrainingConfig:
     candidate_neg_ratio: float = 0.6
     history_max: int = 50
     rank_k: int = 10
-    model_type: str = "deepfm"  # choices: dcn, din, deepfm, sasrec, dcn_din
+    model_type: str = "mmoe"  # choices: dcn, din, deepfm, sasrec, dcn_din, mmoe
+    mmoe_base: str = "mlp"
     cross_layers: int = 3
     hidden_dims: tuple = (256, 128)
     dropout: float = 0.2
@@ -40,6 +43,7 @@ class RankTrainingConfig:
     eval_batch_size: int = 4096
     bpr_margin: float = 0.4
     margin_weight: float = 0.1
+    rating_loss_weight: float = 0.2
 
 
 @dataclass
@@ -53,8 +57,6 @@ def train_ranker_model(
     train_df,
     val_pairs: List[Tuple[int, int]],
     num_items: int,
-    user_store,
-    item_store,
     user_embeddings: torch.Tensor,
     item_embeddings: torch.Tensor,
     user_feat_matrix_cpu: torch.Tensor,
@@ -90,8 +92,6 @@ def train_ranker_model(
     rank_dataset = RankDataset(
         ratings_df=train_df,
         num_items=num_items,
-        user_store=user_store,
-        item_store=item_store,
         config=dataset_cfg,
         user_candidates=user_candidates,
     )
@@ -129,14 +129,14 @@ def train_ranker_model(
         item_idx: torch.Tensor,
         hist_emb: torch.Tensor | None = None,
         hist_mask: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         user_vecs = user_emb_device[user_idx]
         item_vecs = item_emb_device[item_idx]
         user_feats = gather_features(user_feat_device, user_idx)
         item_feats = gather_features(item_feat_device, item_idx)
 
-        if use_history:
-            scores = ranker(
+        outputs = (
+            ranker(
                 user_vecs,
                 item_vecs,
                 u_feats=user_feats,
@@ -144,14 +144,27 @@ def train_ranker_model(
                 hist_emb=hist_emb,
                 hist_mask=hist_mask,
             )
-        else:
-            scores = ranker(
+            if use_history
+            else ranker(
                 user_vecs,
                 item_vecs,
                 u_feats=user_feats,
                 i_feats=item_feats,
             )
-        return scores.view(-1)
+        )
+
+        if isinstance(outputs, tuple):
+            rank_scores, rating_scores = outputs
+        elif isinstance(outputs, dict):
+            rank_scores = outputs.get("rank")
+            rating_scores = outputs.get("rating")
+        else:
+            rank_scores = outputs
+            rating_scores = None
+
+        rank_scores = rank_scores.view(-1)
+        rating_scores = rating_scores.view(-1) if rating_scores is not None else None
+        return rank_scores, rating_scores
 
     user_dim = user_embeddings.shape[1]
     item_dim = item_embeddings.shape[1]
@@ -212,6 +225,14 @@ def train_ranker_model(
             hidden_dims=config.hidden_dims,
             dropout=config.dropout,
         ).to(device)
+    elif model_type == "mmoe":
+        ranker = MMOERanker(
+            user_dim=user_dim,
+            item_dim=item_dim,
+            user_feat_dim=user_feat_dim,
+            item_feat_dim=item_feat_dim,
+            base_model_type=config.mmoe_base,
+        ).to(device)
     else:
         raise ValueError(f"Unknown ranking model_type: {config.model_type}")
 
@@ -268,7 +289,9 @@ def train_ranker_model(
                 hist_mask = None
 
             t_fwd = time.time()
-            pos_scores = score_pairs(user_ids, pos_items, hist_emb, hist_mask)
+            pos_rank_scores, pos_rating_pred = score_pairs(
+                user_ids, pos_items, hist_emb, hist_mask
+            )
 
             neg_flat = neg_items.view(-1)
             neg_user_ids = user_ids.repeat_interleave(num_neg)
@@ -278,31 +301,46 @@ def train_ranker_model(
             else:
                 neg_hist_emb = None
                 neg_hist_mask = None
-            neg_scores = score_pairs(
+            neg_rank_scores, neg_rating_pred = score_pairs(
                 neg_user_ids,
                 neg_flat,
                 neg_hist_emb,
                 neg_hist_mask,
-            ).view(user_ids.size(0), num_neg)
+            )
+            neg_rank_scores = neg_rank_scores.view(user_ids.size(0), num_neg)
             forward_time += time.time() - t_fwd
 
-            pos_mean = pos_scores.mean().item()
-            neg_mean = neg_scores.mean().item()
+            pos_ratings = batch["pos_rating"].to(device, non_blocking=True).view(-1)
+
+            pos_mean = pos_rank_scores.mean().item()
+            neg_mean = neg_rank_scores.mean().item()
             gap = pos_mean - neg_mean
-            hit_ratio = torch.mean((pos_scores.unsqueeze(-1) > neg_scores).float()).item()
+            hit_ratio = torch.mean(
+                (pos_rank_scores.unsqueeze(-1) > neg_rank_scores).float()
+            ).item()
             pos_mean_acc += pos_mean
             neg_mean_acc += neg_mean
             gap_acc += gap
             hit_acc += hit_ratio
             batch_count += 1
 
-            bpr = bpr_loss(pos_scores.unsqueeze(-1), neg_scores)
-            pos_mean = pos_scores.mean()
-            neg_mean = neg_scores.mean()
+            bpr = bpr_loss(pos_rank_scores.unsqueeze(-1), neg_rank_scores)
             margin_penalty = torch.relu(
-                config.bpr_margin - (pos_mean - neg_mean)
+                config.bpr_margin - (pos_rank_scores.mean() - neg_rank_scores.mean())
             )
+
+            rating_loss = torch.tensor(0.0, device=device)
+            if pos_rating_pred is not None:
+                target = pos_ratings
+                mask = target > 0
+                if mask.any():
+                    rating_loss = F.mse_loss(pos_rating_pred[mask], target[mask])
+                else:
+                    rating_loss = torch.tensor(0.0, device=device)
+
             loss = bpr + config.margin_weight * margin_penalty
+            if pos_rating_pred is not None and config.rating_loss_weight > 0:
+                loss = loss + config.rating_loss_weight * rating_loss
             t_bwd = time.time()
             loss.backward()
             optimizer.step()

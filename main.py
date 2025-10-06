@@ -21,43 +21,20 @@ def main():
     print(f"Using device: {device}")
 
     import time
-
+    candidate_k = 100
     start_time = time.time()
     data = load_and_prepare_data("data/ml-1m")
     print(f"[Timing] Data prep took {time.time() - start_time:.2f}s")
     step_time = time.time()
-    feature_components = build_feature_components(
-        data.train,
-        data.movies,
-        num_users=data.num_users,
-        num_items=data.num_items,
-        device=device,
-    )
-    print(f"[Timing] Feature components built in {time.time() - step_time:.2f}s")
-
-    debug_feature_usage(
-        "user",
-        feature_components.user_encoder,
-        feature_components.user_feature_cache,
-        data.num_users,
-        device,
-    )
-    debug_feature_usage(
-        "item",
-        feature_components.item_encoder,
-        feature_components.item_feature_cache,
-        data.num_items,
-        device,
-        extra_tensor=feature_components.item_title_embeddings,
-    )
-
     item_name_lookup = build_item_name_lookup(data.movies)
 
     cache_dir = Path("cache/recall_outputs")
     step_time = time.time()
     cache_data = load_recall_cache(cache_dir)
     print(f"[Timing] Cache lookup took {time.time() - step_time:.2f}s")
-    if cache_data is not None:
+    feature_components = None
+    if False:
+    # if cache_data is not None:
         print("Loaded recall artifacts from cache.")
         (
             user_embeddings,
@@ -67,6 +44,31 @@ def main():
             user_candidates,
         ) = cache_data
     else:
+        feature_components = build_feature_components(
+            data.train,
+            data.movies,
+            num_users=data.num_users,
+            num_items=data.num_items,
+            device=device,
+        )
+        print(f"[Timing] Feature components built in {time.time() - step_time:.2f}s")
+
+        debug_feature_usage(
+            "user",
+            feature_components.user_encoder,
+            feature_components.user_feature_cache,
+            data.num_users,
+            device,
+        )
+        debug_feature_usage(
+            "item",
+            feature_components.item_encoder,
+            feature_components.item_feature_cache,
+            data.num_items,
+            device,
+            extra_tensor=feature_components.item_title_embeddings,
+        )
+
         step_time = time.time()
         recall_outputs = train_two_tower_model(
             data.train,
@@ -99,16 +101,16 @@ def main():
             item_embeddings,
             data.user_consumed,
             candidate_sources,
-            candidate_k=100,
-            faiss_weight=0.8,
-            covis_weight=0.4,
-            itemcf_weight=0.4,
-            popular_weight=0,
-            genre_weight=0.2,
+            candidate_k=candidate_k,
+            faiss_weight=1,
+            # covis_weight=0.4,
+            # itemcf_weight=0.4,
+            # popular_weight=0,
+            # genre_weight=0.2,
         )
         print(f"[Timing] Hybrid candidate building took {time.time() - step_time:.2f}s")
 
-        recall_results = evaluate_candidates(user_candidates, data.test_pairs, k=100)
+        recall_results = evaluate_candidates(user_candidates, data.test_pairs, k=candidate_k)
         print("Hybrid Recall Eval (after warm-up):", recall_results)
 
         feature_components.user_encoder.eval()
@@ -183,8 +185,6 @@ def main():
         data.train,
         data.val_pairs,
         data.num_items,
-        feature_components.user_store,
-        feature_components.item_store,
         user_embeddings,
         item_embeddings,
         user_feat_matrix_cpu,

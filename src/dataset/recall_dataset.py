@@ -75,7 +75,7 @@ class RecallDataset(Dataset):
         counts[: self.items.numel()] += np.bincount(
             self.items.cpu().numpy(), minlength=self.num_items
         )
-        if cfg.tail_alpha > 0.0:
+        if cfg.tail_alpha != 0.0:
             weights = np.power(counts, -cfg.tail_alpha, where=counts > 0)
             weights[counts <= 0] = 0.0
         else:
