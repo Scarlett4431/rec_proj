@@ -1,10 +1,13 @@
+from typing import Any, Dict, Optional, Sequence
+
 import torch
 import torch.nn as nn
-from typing import Sequence
 
 from src.rank.deepfm import DeepFM
 from src.rank.dcn import DCNRanker
+from src.rank.din import DINRanker
 from src.rank.rank_mlp import RankerMLP
+from src.rank.sasrec import SASRecRanker
 
 
 def _concat_inputs(user_emb, item_emb, u_feats=None, i_feats=None):
@@ -37,9 +40,17 @@ class _ExpertAdapter(nn.Module):
         if not hasattr(base_model, "feature_dim"):
             raise AttributeError("Base model must expose feature_dim.")
         self.output_dim = base_model.feature_dim
+        self.requires_history = getattr(base_model, "requires_history", False)
 
     def forward(self, user_emb, item_emb, u_feats=None, i_feats=None, hist_emb=None, hist_mask=None):
-        return self.base_model.extract_features(user_emb, item_emb, u_feats, i_feats)
+        return self.base_model.extract_features(
+            user_emb,
+            item_emb,
+            u_feats=u_feats,
+            i_feats=i_feats,
+            hist_emb=hist_emb,
+            hist_mask=hist_mask,
+        )
 
 
 def _create_experts(
@@ -51,39 +62,67 @@ def _create_experts(
     item_feat_dim: int,
     expert_hidden: Sequence[int],
     dropout: float,
+    base_model_kwargs: Optional[Dict[str, Any]] = None,
 ) -> nn.ModuleList:
     base = base_model.lower()
+    hidden_dims = tuple(expert_hidden) if expert_hidden else tuple()
     experts = []
+    kwargs_template = base_model_kwargs or {}
     for _ in range(num_experts):
+        kwargs = dict(kwargs_template)
         if base == "mlp":
+            kwargs.setdefault("hidden_dims", hidden_dims)
+            kwargs.setdefault("dropout", dropout)
             model = RankerMLP(
                 user_dim=user_dim,
                 item_dim=item_dim,
                 user_feat_dim=user_feat_dim,
                 item_feat_dim=item_feat_dim,
-                hidden_dims=expert_hidden,
-                dropout=dropout,
+                **kwargs,
             )
         elif base == "deepfm":
-            fm_dim = max(16, expert_hidden[-1] if expert_hidden else 16)
+            fm_dim = kwargs.pop("fm_dim", max(16, hidden_dims[-1] if hidden_dims else 16))
+            kwargs.setdefault("hidden_dims", hidden_dims)
+            kwargs.setdefault("dropout", dropout)
             model = DeepFM(
                 user_dim=user_dim,
                 item_dim=item_dim,
                 user_feat_dim=user_feat_dim,
                 item_feat_dim=item_feat_dim,
                 fm_dim=fm_dim,
-                hidden_dims=expert_hidden,
-                dropout=dropout,
+                **kwargs,
             )
         elif base == "dcn":
+            cross_layers = kwargs.pop("cross_layers", 3)
+            kwargs.setdefault("hidden_dims", hidden_dims)
+            kwargs.setdefault("dropout", dropout)
             model = DCNRanker(
                 user_dim=user_dim,
                 item_dim=item_dim,
                 user_feat_dim=user_feat_dim,
                 item_feat_dim=item_feat_dim,
-                cross_layers=3,
-                hidden_dims=expert_hidden,
-                dropout=dropout,
+                cross_layers=cross_layers,
+                **kwargs,
+            )
+        elif base == "din":
+            kwargs.setdefault("dnn_hidden", hidden_dims or (128, 64))
+            kwargs.setdefault("dropout", dropout)
+            model = DINRanker(
+                user_dim=user_dim,
+                item_dim=item_dim,
+                user_feat_dim=user_feat_dim,
+                item_feat_dim=item_feat_dim,
+                **kwargs,
+            )
+        elif base == "sasrec":
+            kwargs.setdefault("dnn_hidden", hidden_dims or (128, 64))
+            kwargs.setdefault("dropout", dropout)
+            model = SASRecRanker(
+                user_dim=user_dim,
+                item_dim=item_dim,
+                user_feat_dim=user_feat_dim,
+                item_feat_dim=item_feat_dim,
+                **kwargs,
             )
         else:
             raise ValueError(f"Unsupported MMOE base_model_type: {base_model}")
@@ -105,10 +144,12 @@ class MMOERanker(nn.Module):
         tower_hidden: Sequence[int] = (128,),
         dropout: float = 0.2,
         base_model_type: str = "mlp",
+        base_model_kwargs: Optional[Dict[str, Any]] = None,
     ):
         super().__init__()
 
         self.input_dim = user_dim + item_dim + user_feat_dim + item_feat_dim
+        hidden_dims = tuple(expert_hidden) if expert_hidden else tuple()
         self.experts = _create_experts(
             base_model=base_model_type,
             num_experts=num_experts,
@@ -116,8 +157,9 @@ class MMOERanker(nn.Module):
             item_dim=item_dim,
             user_feat_dim=user_feat_dim,
             item_feat_dim=item_feat_dim,
-            expert_hidden=expert_hidden,
+            expert_hidden=hidden_dims,
             dropout=dropout,
+            base_model_kwargs=base_model_kwargs,
         )
         self.expert_output_dim = self.experts[0].output_dim
 
@@ -134,7 +176,9 @@ class MMOERanker(nn.Module):
             tower_hidden[-1] if tower_hidden else self.expert_output_dim, 1
         )
 
-        self.requires_history = False
+        self.requires_history = any(
+            getattr(expert, "requires_history", False) for expert in self.experts
+        )
 
     def forward(
         self,

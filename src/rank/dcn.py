@@ -59,6 +59,7 @@ class DCNRanker(nn.Module):
 
         combined_dim = input_dim + (hidden_dims[-1] if hidden_dims else input_dim)
         self.output_layer = nn.Linear(combined_dim, 1)
+        self.feature_dim = combined_dim
 
     def _concat_features(self, u_emb, i_emb, u_feats=None, i_feats=None):
         parts = [u_emb, i_emb]
@@ -68,10 +69,21 @@ class DCNRanker(nn.Module):
             parts.append(i_feats)
         return torch.cat(parts, dim=-1)
 
-    def forward(self, u_emb, i_emb, u_feats=None, i_feats=None, hist_emb=None, hist_mask=None):
+    def extract_features(
+        self,
+        u_emb,
+        i_emb,
+        u_feats=None,
+        i_feats=None,
+        hist_emb=None,
+        hist_mask=None,
+    ):
         x = self._concat_features(u_emb, i_emb, u_feats, i_feats)
         cross_out = self.cross_net(x)
         deep_out = self.deep_net(x)
-        combined = torch.cat([cross_out, deep_out], dim=-1)
+        return torch.cat([cross_out, deep_out], dim=-1)
+
+    def forward(self, u_emb, i_emb, u_feats=None, i_feats=None, hist_emb=None, hist_mask=None):
+        combined = self.extract_features(u_emb, i_emb, u_feats, i_feats)
         logits = self.output_layer(combined)
         return torch.sigmoid(logits).squeeze(-1)
